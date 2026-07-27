@@ -1,0 +1,147 @@
+use std.test :open
+use uzor.core :open
+use uzor.style :open
+
+;; The buffer layer is pure, so every one of these runs with no
+;; terminal anywhere in sight — which is the point of building the
+;; toolkit on values rather than on writes.
+
+st := plain
+bold := style {bold= true}
+
+;; ── Rect ────────────────────────────────────────────────────────────
+
+r1 := test "rect clamps negative size" (-> assert-eq 0 (get "w" (rect 0 0 (-5) 3)))
+r2 := test "rect-right" (-> assert-eq 14 (rect-right (rect 4 0 10 2)))
+r3 := test "rect-empty? on zero height" (-> assert-true (rect-empty? (rect 0 0 10 0)))
+
+fn overlap
+  =>
+  rect-intersect (rect 0 0 10 10) (rect 5 5 10 10)
+
+r4 := test "intersect overlapping" (-> assert-eq (rect 5 5 5 5) (overlap ()))
+
+fn disjoint
+  =>
+  rect-intersect (rect 0 0 4 4) (rect 20 20 4 4)
+
+r5 := test "intersect disjoint is empty" (-> assert-true (rect-empty? (disjoint ())))
+r6 := test "inset shrinks all sides" (-> assert-eq (rect 1 1 8 8) (rect-inset (rect 0 0 10 10) 1))
+r7 := test "contains? edge is exclusive" (-> assert-eq false (rect-contains? (rect 0 0 3 3) 3 0))
+
+;; ── Spans and widths ────────────────────────────────────────────────
+
+r8 := test "span width is cells not chars" (-> assert-eq 6 (span-width (span "日本語" st)))
+r9 := test "line-width sums spans" (-> assert-eq 5 (line-width #[(span "ab" st) (span "cde" st)]))
+
+;; ── line-take / line-drop ───────────────────────────────────────────
+
+fn take-mid
+  =>
+  line-take #[(span "hello" st)] 3
+
+r10 := test "take cuts a span" (-> assert-eq #[(span "hel" st)] (take-mid ()))
+
+fn take-pads
+  =>
+  line-take #[(span "ab" st)] 5
+
+;; Padding is what makes "draw at column 40" work on a short line.
+r11 := test "take pads a short line" (-> assert-eq 5 (line-width (take-pads ())))
+
+fn drop-mid
+  =>
+  line-drop #[(span "hello" st)] 2
+
+r12 := test "drop cuts a span" (-> assert-eq #[(span "llo" st)] (drop-mid ()))
+
+fn drop-whole-span
+  =>
+  line-drop #[(span "ab" st) (span "cd" bold)] 2
+
+r13 := test "drop skips a whole span" (-> assert-eq #[(span "cd" bold)] (drop-whole-span ()))
+
+fn drop-past-end
+  =>
+  line-drop #[(span "ab" st)] 10
+
+r14 := test "drop past the end is empty" (-> assert-true (empty? (drop-past-end ())))
+
+;; ── Wide characters straddling a cut ────────────────────────────────
+;; A double-width glyph cut in half becomes a space. Letting it run one
+;; cell long would shift everything after it on the line.
+
+fn take-straddle
+  =>
+  line-take #[(span "日本" st)] 3
+
+r15 := test "take through a wide char keeps the width" (-> assert-eq 3 (line-width (take-straddle ())))
+r16 := test "take through a wide char pads with a space" (-> assert-eq "日 " (get "text" (nth 0 (take-straddle ()))))
+
+fn drop-straddle
+  =>
+  line-drop #[(span "日本" st)] 1
+
+r17 := test "drop through a wide char keeps the width" (-> assert-eq 3 (line-width (drop-straddle ())))
+r18 := test "drop through a wide char pads with a space" (-> assert-eq " 本" (get "text" (nth 0 (drop-straddle ()))))
+
+;; ── line-splice ─────────────────────────────────────────────────────
+
+fn splice-mid
+  =>
+  line-splice #[(span "hello world" st)] 6 #[(span "there" bold)]
+
+r19 := test "splice keeps total width" (-> assert-eq 11 (line-width (splice-mid ())))
+r20 := test "splice keeps the head" (-> assert-eq "hello " (get "text" (nth 0 (splice-mid ()))))
+r21 := test "splice inserts the new span" (-> assert-eq "there" (get "text" (nth 1 (splice-mid ()))))
+
+fn splice-past-end
+  =>
+  line-splice #[(span "ab" st)] 5 #[(span "X" bold)]
+
+r22 := test "splice past the end pads the gap" (-> assert-eq 6 (line-width (splice-past-end ())))
+
+fn splice-at-zero
+  =>
+  line-splice #[(span "abcdef" st)] 0 #[(span "XY" bold)]
+
+r23 := test "splice at zero overwrites the front" (-> assert-eq 6 (line-width (splice-at-zero ())))
+r24 := test "splice at zero keeps the tail" (-> assert-eq "cdef" (get "text" (nth 1 (splice-at-zero ()))))
+
+;; ── Buffer writes ───────────────────────────────────────────────────
+
+fn write-text
+  =>
+  buf-text (buffer 20 3) 1 2 st "hi"
+
+r25 := test "text lands on the right row" (-> assert-eq 4 (line-width (buf-line (write-text ()) 1)))
+r26 := test "other rows stay empty" (-> assert-true (empty? (buf-line (write-text ()) 0)))
+
+fn write-off-buffer
+  =>
+  buf-text (buffer 20 3) 9 0 st "nope"
+
+r27 := test "a row outside the buffer is dropped" (-> assert-eq (buffer 20 3) (write-off-buffer ()))
+
+;; Clipping is the guarantee that a widget which miscomputes its own
+;; size corrupts its own region and never the rest of the frame.
+fn write-overflowing
+  =>
+  buf-text (buffer 10 1) 0 6 st "abcdefgh"
+
+r28 := test "over-long text is clipped at the width" (-> assert-eq 10 (line-width (buf-line (write-overflowing ()) 0)))
+
+fn write-negative-col
+  =>
+  buf-text (buffer 10 1) 0 (-3) st "abcdefgh"
+
+r29 := test "a negative column clips the front" (-> assert-eq "defgh" (get "text" (nth 0 (buf-line (write-negative-col ()) 0))))
+
+fn fill-region
+  =>
+  buf-fill (buffer 10 4) (rect 2 1 3 2) bold "#"
+
+r30 := test "fill covers its rows" (-> assert-eq 5 (line-width (buf-line (fill-region ()) 1)))
+r31 := test "fill leaves rows outside alone" (-> assert-true (empty? (buf-line (fill-region ()) 3)))
+
+summarize #[r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15 r16 r17 r18 r19 r20 r21 r22 r23 r24 r25 r26 r27 r28 r29 r30 r31]

@@ -1,0 +1,100 @@
+use std.test :open
+use std.term {csi}
+use uzor.core :open
+use uzor.style :open
+
+;; Rendering and diffing produce strings, so the bytes that would go to
+;; a terminal are asserted on directly. No tty, no mock, no handler.
+;;
+;; The `st` binding below doubles as a regression guard: a top-level
+;; binding whose name collides with a parameter inside uzor.style used
+;; to make `sgr` return the wrong style, because a lambda capturing
+;; that parameter resolved it to the caller's global instead. Keep the
+;; name — if the capture bug comes back, r5 fails.
+
+st := plain
+red-st := style {fg= red}
+
+;; ── render-line ─────────────────────────────────────────────────────
+
+r1 := test "an empty line renders to nothing" (-> assert-eq "" (render-line #[]))
+
+fn one-span
+  =>
+  render-line #[(span "hi" st)]
+
+;; Full SGR state per span, then a reset — a differential encoder would
+;; have to track what the terminal is already showing, and any drift
+;; smears colour across the screen.
+r2 := test "a span carries its style then resets" (-> assert-eq ((sgr st) ++ "hi" ++ (sgr st)) (one-span ()))
+
+fn two-spans
+  =>
+  render-line #[(span "a" st) (span "b" red-st)]
+
+r3 := test "each span restates its style" (-> assert-eq ((sgr st) ++ "a" ++ (sgr red-st) ++ "b" ++ (sgr st)) (two-spans ()))
+
+r4 := test "a colour reaches the escape" (-> assert-true (index-of (sgr red-st) "38;5;1" >= 0))
+r5 := test "bold reaches the escape" (-> assert-true (index-of (sgr (style {bold= true})) "1" >= 0))
+r6 := test "default colours emit no colour params" (-> assert-eq (csi "0m") (sgr plain))
+
+;; ── move-to ─────────────────────────────────────────────────────────
+
+;; Buffers are 0-based, cursor addressing is 1-based. The conversion
+;; lives in one place; off-by-one here would shift every frame.
+r7 := test "move-to is 1-based" (-> assert-eq (csi "3;1H") (move-to 3 1))
+
+;; ── buf-render ──────────────────────────────────────────────────────
+
+fn full-frame
+  =>
+  buf-render (buf-text (buffer 10 2) 0 0 st "hi")
+
+r8 := test "a full render clears the screen first" (-> assert-eq 0 (index-of (full-frame ()) (csi "2J")))
+r9 := test "a full render addresses every row" (-> assert-true (index-of (full-frame ()) (csi "2;1H") >= 0))
+r10 := test "a full render erases each line's tail" (-> assert-true (index-of (full-frame ()) (csi "K") >= 0))
+
+;; ── buf-diff ────────────────────────────────────────────────────────
+
+fn same-frame
+  =>
+  buf-diff (buf-text (buffer 10 3) 1 0 st "hi") (buf-text (buffer 10 3) 1 0 st "hi")
+
+;; The property the whole render loop rests on: an unchanged frame
+;; costs zero bytes, so an idle app is silent.
+r11 := test "identical frames diff to nothing" (-> assert-eq "" (same-frame ()))
+
+fn changed-row
+  =>
+  buf-diff (buf-text (buffer 10 3) 1 0 st "hi") (buf-text (buffer 10 3) 1 0 st "ho")
+
+r12 := test "a changed row is addressed" (-> assert-eq 0 (index-of (changed-row ()) (csi "2;1H")))
+r13 := test "a changed row carries its new text" (-> assert-true (index-of (changed-row ()) "ho" >= 0))
+r14 := test "a changed row erases its tail" (-> assert-true (index-of (changed-row ()) (csi "K") >= 0))
+r15 := test "untouched rows contribute nothing" (-> assert-eq (-1) (index-of (changed-row ()) (csi "1;1H")))
+
+fn style-only-change
+  =>
+  buf-diff (buf-text (buffer 10 2) 0 0 st "hi") (buf-text (buffer 10 2) 0 0 red-st "hi")
+
+;; Same characters, different colour — the diff has to notice, which is
+;; why it compares rendered bytes rather than text.
+r16 := test "a style-only change still redraws" (-> assert-true (length (style-only-change ()) > 0))
+
+fn resized
+  =>
+  buf-diff (buffer 10 3) (buffer 20 3)
+
+;; Everything below the first reflowed line has moved, so a patch is
+;; meaningless.
+r17 := test "a size change forces a full repaint" (-> assert-eq 0 (index-of (resized ()) (csi "2J")))
+
+fn cleared-row
+  =>
+  buf-diff (buf-text (buffer 10 2) 0 0 st "hello") (buffer 10 2)
+
+;; Erasing content is the case a naive diff misses: the new line is
+;; empty, so only the erase-to-end-of-line actually removes anything.
+r18 := test "an emptied row is erased" (-> assert-eq ((move-to 1 1) ++ (csi "K")) (cleared-row ()))
+
+summarize #[r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15 r16 r17 r18]

@@ -1,0 +1,216 @@
+mod uzor.style
+
+use std.term {csi}
+
+;; Colours, attributes and display width — everything needed to turn a
+;; run of text into bytes a terminal understands. No effects here: a
+;; style is a map, `sgr` is a pure Str, and width is computed from code
+;; points. That keeps the whole rendering path testable without a
+;; terminal.
+
+;; ── Colours ─────────────────────────────────────────────────────────
+;;
+;; A colour is an Int: -1 is the terminal's own default, 0..255 index
+;; the xterm palette (0-7 basic, 8-15 bright, 16-231 the 6x6x6 cube,
+;; 232-255 the grey ramp). The palette is used rather than truecolour
+;; because it degrades gracefully — a 256-colour escape renders
+;; somewhere sane on everything from tmux to a bare Linux console,
+;; while a truecolour one can come out as noise.
+
+pub color-default := -1
+
+pub black := 0
+pub red := 1
+pub green := 2
+pub yellow := 3
+pub blue := 4
+pub magenta := 5
+pub cyan := 6
+pub white := 7
+pub bright-black := 8
+pub bright-red := 9
+pub bright-green := 10
+pub bright-yellow := 11
+pub bright-blue := 12
+pub bright-magenta := 13
+pub bright-cyan := 14
+pub bright-white := 15
+
+;; Grey ramp entry, 0 (near-black) .. 23 (near-white).
+pub fn grey :: Int Int
+  => n
+  232 + (max 0 (min 23 n))
+
+;; 6x6x6 colour cube; each component 0..5.
+pub fn rgb6 :: Int Int Int Int
+  => r g b
+  16 + (36 * (clamp5 r)) + (6 * (clamp5 g)) + (clamp5 b)
+
+fn clamp5 :: Int Int
+  => n
+  max 0 (min 5 n)
+
+;; ── Styles ──────────────────────────────────────────────────────────
+
+pub spec Style
+  fg :: Int
+  bg :: Int
+  bold :: Bool
+  dim :: Bool
+  italic :: Bool
+  underline :: Bool
+  reverse :: Bool
+
+;; The identity style — default colours, no attributes.
+pub plain := {fg= -1 bg= -1 bold= false dim= false italic= false underline= false reverse= false}
+
+;; `style {fg= red bold= true}` — the rest come from `plain`, so a
+;; caller never has to spell out all seven fields.
+pub fn style :: Map Map
+  => overrides
+  merge plain overrides
+
+pub fn with-fg :: Map Int Map
+  => st c
+  assoc st "fg" c
+
+pub fn with-bg :: Map Int Map
+  => st c
+  assoc st "bg" c
+
+;; ── SGR ─────────────────────────────────────────────────────────────
+
+;; `sgr st` — the Select Graphic Rendition sequence that puts a
+;; terminal into this style.
+;;
+;; Every sequence starts with a reset (`0`). Emitting the full state
+;; per span costs a handful of bytes and removes a whole class of bug:
+;; a differential encoder has to know what the terminal is already
+;; showing, and any drift (a resize, a stray write, a redrawn region)
+;; leaves colour smeared across the screen.
+pub fn sgr :: Map Str
+  => st
+  csi ((join ";" (sgr-params st)) ++ "m")
+
+;; Explicit recursion rather than a fold with a lambda: a lambda here
+;; would have to capture `st`, and captured parameters currently lose
+;; to a same-named top-level binding in the *calling* program (an Irij
+;; scoping bug — a caller with `st := …` silently got the wrong style).
+;; Recursion passes everything by argument, so nothing is captured.
+fn sgr-params :: Map Vec
+  => st
+  add-colors st (collect-attrs st attr-flags #["0"])
+
+fn collect-attrs :: Map Vec Vec Vec
+  => st flags params
+  if (empty? flags)
+    params
+  else
+    collect-attrs st (tail flags) (add-attr st params (head flags))
+
+;; attribute key → SGR parameter
+attr-flags := #[#["bold" "1"] #["dim" "2"] #["italic" "3"] #["underline" "4"] #["reverse" "7"]]
+
+fn add-attr :: Map Vec Vec Vec
+  => st params flag
+  if (get (nth 0 flag) st)
+    conj params (nth 1 flag)
+  else
+    params
+
+fn add-colors :: Map Vec Vec
+  => st params
+  with-fg-param := add-color params (get "fg" st) "38"
+  add-color with-fg-param (get "bg" st) "48"
+
+fn add-color :: Vec Int Str Vec
+  => params c prefix
+  if (c < 0)
+    params
+  else
+    conj params (prefix ++ ";5;" ++ (to-str c))
+
+;; ── Display width ───────────────────────────────────────────────────
+;;
+;; Cells, not characters. A CJK ideograph occupies two columns and a
+;; combining mark none; laying out by `length` drifts on both, and a
+;; drifting layout corrupts every line below it.
+;;
+;; This is the wcwidth table, trimmed to the ranges that matter. It
+;; duplicates what `term-str-width` gets from JLine, deliberately: the
+;; buffer layer stays pure and testable, and an app that wants the
+;; terminal's own opinion can still ask for it.
+;;
+;; Known gap: emoji ZWJ sequences (a flag, a family) count as their
+;; parts rather than one cluster, so they over-count. Terminals
+;; disagree about those anyway.
+
+wide-ranges := #[#[4352 4447] #[8986 8987] #[9193 9196] #[9725 9726] #[9800 9811] #[11904 12871] #[12880 19903] #[19968 42191] #[43360 43388] #[44032 55203] #[63744 64255] #[65040 65049] #[65072 65135] #[65281 65376] #[65504 65510] #[127744 128591] #[128640 128764] #[129280 129750] #[131072 262141]]
+
+zero-ranges := #[#[768 879] #[1155 1161] #[8203 8207] #[8288 8292] #[8400 8447] #[65024 65039] #[65056 65071]]
+
+;; Recursive rather than a filter with a lambda, for the capture reason
+;; described above `sgr-params` — the lambda would close over `cp`.
+fn in-ranges? :: Int Vec Bool
+  => cp ranges
+  if (empty? ranges)
+    false
+  else
+    in-range-step cp ranges
+
+fn in-range-step :: Int Vec Bool
+  => cp ranges
+  r := head ranges
+  if ((cp >= (nth 0 r)) && (cp <= (nth 1 r)))
+    true
+  else
+    in-ranges? cp (tail ranges)
+
+;; Width of a single code point: 0, 1 or 2.
+pub fn char-cells :: Int Int
+  => cp
+  if (cp < 32)
+    0
+  else
+    visible-cells cp
+
+fn visible-cells :: Int Int
+  => cp
+  if (in-ranges? cp zero-ranges)
+    0
+  else
+    wide-or-one cp
+
+fn wide-or-one :: Int Int
+  => cp
+  if (in-ranges? cp wide-ranges)
+    2
+  else
+    1
+
+;; Width of a string in cells.
+pub fn cell-width :: Str Int
+  => s
+  width-from s 0 0
+
+fn width-from :: Str Int Int Int
+  => s i acc
+  if (i >= (length s))
+    acc
+  else
+    width-step s i acc
+
+;; Irij strings are UTF-16, so an astral code point (emoji, rare CJK)
+;; arrives as a surrogate pair. Measuring the halves separately would
+;; count it as two 1-cell characters instead of one 2-cell one.
+fn width-step :: Str Int Int Int
+  => s i acc
+  hi := char-code (char-at s i)
+  if ((hi >= 55296) && (hi <= 56319) && ((i + 1) < (length s)))
+    width-from s (i + 2) (acc + (char-cells (astral-cp hi (char-code (char-at s (i + 1))))))
+  else
+    width-from s (i + 1) (acc + (char-cells hi))
+
+fn astral-cp :: Int Int Int
+  => hi lo
+  65536 + ((hi - 55296) * 1024) + (lo - 56320)

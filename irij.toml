@@ -1,0 +1,7 @@
+[project]
+name = "uzor"
+version = "0.1"
+description = "Terminal UI toolkit for Irij — cell buffers, layout, widgets"
+author = "aldebogdanov"
+repo = "https://github.com/aldebogdanov/uzor"
+license = "MIT"
