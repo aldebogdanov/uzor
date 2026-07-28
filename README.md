@@ -128,9 +128,11 @@ A *line* is deliberately a plain `Vec` of spans. It's touched several times per
 drawn string, and validating a spec per element would put a walk of the whole
 line on every splice.
 
-Note that Irij product specs check field **presence**, not field types, and
-don't distinguish one spec from another structurally — passing a `Buffer` where
-a `Rect` is wanted isn't caught.
+Note that Irij product specs currently check field **presence** only. The
+declared field types (`x :: Int`) are parsed and then dropped at registration,
+so `{x= "nope" y= 0 w= 0 h= 0}` satisfies `Rect`, and any value carrying a
+superset of the field names passes too. Sum specs *are* discriminated (tag must
+be a declared variant, arity checked) — this gap is products only.
 
 ## Development
 
