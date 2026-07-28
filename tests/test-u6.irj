@@ -1,0 +1,137 @@
+use std.test :open
+use uzor.core :open
+use uzor.style :open
+use uzor.text :open
+use uzor.layout :open
+use uzor.box :open
+use uzor.widgets :open
+use uzor.event :open
+use uzor.theme :open
+use uzor.overlay :open
+
+fn row-text
+  => buf row
+  fold (acc s -> acc ++ s.text) "" (buf-line buf row)
+
+;; ── Mouse events ────────────────────────────────────────────────────
+
+click := {kind= "mouse" btn= "left" press= true col= 11 row= 2 mods= #[]}
+release := {kind= "mouse" btn= "left" press= false col= 11 row= 2 mods= #[]}
+wheel := {kind= "mouse" btn= "wheel-up" press= true col= 1 row= 1 mods= #[]}
+keypress := {kind= "key" key= "a" ch= "a" mods= #[]}
+idle := {kind= "none"}
+
+r1 := test "a left press is recognised" (-> assert-true (mouse-press? click "left"))
+r2 := test "the button has to match" (-> assert-eq false (mouse-press? click "right"))
+r3 := test "a release is not a press" (-> assert-eq false (mouse-press? release "left"))
+r4 := test "a release is recognised" (-> assert-true (mouse-release? release))
+r5 := test "wheel up" (-> assert-true (wheel-up? wheel))
+r6 := test "wheel down is a different button" (-> assert-eq false (wheel-down? wheel))
+
+;; Non-mouse events carry no btn/press/col fields at all. Irij's `&&`
+;; short-circuits now, but these predicates are still written as nested
+;; ifs so they survive on an older compiler — and the tests pin the
+;; behaviour either way.
+r7 := test "a key is not a mouse press" (-> assert-eq false (mouse-press? keypress "left"))
+r8 := test "an idle tick is not a mouse release" (-> assert-eq false (mouse-release? idle))
+r9 := test "an idle tick is not a wheel" (-> assert-eq false (wheel-up? idle))
+
+r10 := test "mouse-pos reads the coordinates" (-> assert-eq #(11 2) (mouse-pos click))
+;; An obviously-outside position rather than a crash, for a caller that
+;; forgot to check the kind first.
+r11 := test "a non-mouse event has no position" (-> assert-eq #((-1) (-1)) (mouse-pos idle))
+
+;; ── Hit testing ─────────────────────────────────────────────────────
+;; The widget drew the list, so the widget knows which item a row is.
+;; An app working it out itself would duplicate the scroll arithmetic
+;; and drift the moment the widget changed.
+
+items := #["alpha" "beta" "gamma" "delta"]
+pane := rect 2 1 10 3
+
+r12 := test "a click selects the row under it" (-> assert-eq 0 (list-hit pane (list-view items 0 0) 3 1))
+r13 := test "the second row is the second item" (-> assert-eq 1 (list-hit pane (list-view items 0 0) 3 2))
+r14 := test "an offset list maps through the scroll" (-> assert-eq 3 (list-hit pane (list-view items 0 2) 3 2))
+
+;; A click on empty space below a short list is not a click on its last
+;; item.
+r15 := test "a click past the last item hits nothing" (-> assert-eq () (list-hit pane (list-view #["only"] 0 0) 3 2))
+r16 := test "a click outside the pane hits nothing" (-> assert-eq () (list-hit pane (list-view items 0 0) 30 2))
+r17 := test "a click above the pane hits nothing" (-> assert-eq () (list-hit pane (list-view items 0 0) 3 0))
+
+tbl := table #["name" "qty"] #[#["apple" "3"] #["pear" "12"]] #[(Fill 1) (Fixed 5)] 0 0
+
+;; The header is a label, not a row.
+r18 := test "a click on the header hits nothing" (-> assert-eq () (table-hit pane tbl 3 1))
+r19 := test "the first body row is item zero" (-> assert-eq 0 (table-hit pane tbl 3 2))
+r20 := test "a click past the last row hits nothing" (-> assert-eq () (table-hit (rect 2 1 10 9) tbl 3 5))
+
+;; ── Themes ──────────────────────────────────────────────────────────
+
+r21 := test "a theme carries its box characters" (-> assert-eq "+" (mono-theme ()).chars.tl)
+r22 := test "mono has no colour" (-> assert-eq (-1) (mono-theme ()).accent.fg)
+r23 := test "dark uses rounded corners" (-> assert-eq "╭" (dark-theme ()).chars.tl)
+
+r24 := test "theme-named finds light" (-> assert-eq (light-theme ()).accent (theme-named "light").accent)
+r25 := test "theme-named finds mono" (-> assert-eq "+" (theme-named "mono").chars.tl)
+;; A stale name in a config file shouldn't stop the app starting.
+r26 := test "an unknown name gives the default" (-> assert-eq (dark-theme ()).chars.tl (theme-named "nonsense").chars.tl)
+
+r27 := test "with-chars swaps only the characters" (-> assert-eq "+" (with-chars (dark-theme ()) (ascii-box ())).chars.tl)
+r28 := test "with-chars keeps the palette" (-> assert-eq (dark-theme ()).accent (with-chars (dark-theme ()) (ascii-box ())).accent)
+r29 := test "with-accent swaps only the accent" (-> assert-eq (dark-theme ()).border (with-accent (dark-theme ()) (style {fg= red})).border)
+
+;; ── Dimming ─────────────────────────────────────────────────────────
+;; A region pushed back without being hidden — the user can still read
+;; what they're being asked about.
+
+fn dimmed
+  =>
+  dim (buf-text (buffer 12 2) 0 0 plain "hello world") (rect 0 0 12 1) (style {fg= bright-black})
+
+r30 := test "dimming keeps the text" (-> assert-eq "hello world " (row-text (dimmed ()) 0))
+r31 := test "dimming restyles the region" (-> assert-eq 8 (nth 0 (buf-line (dimmed ()) 0)).st.fg)
+
+fn partly-dimmed
+  =>
+  dim (buf-text (buffer 12 1) 0 0 plain "hello world") (rect 0 0 5 1) (style {fg= red})
+
+r32 := test "dimming leaves the rest alone" (-> assert-eq (-1) (last (buf-line (partly-dimmed ()) 0)).st.fg)
+
+;; ── Overlays ────────────────────────────────────────────────────────
+
+fn under
+  =>
+  buf-fill (buffer 30 9) (rect 0 0 30 9) plain "."
+
+fn dialog
+  =>
+  draw-dialog (under ()) (rect 0 0 30 9) (dark-theme ()) " help " "press q to quit and j to move" 24 7
+
+;; A panel that only drew its border would leave the old frame showing
+;; through its middle.
+r33 := test "a dialog clears what it covers" (-> assert-eq "...│                      │..." (row-text (dialog ()) 2))
+r34 := test "a dialog frames itself" (-> assert-true (index-of (row-text (dialog ()) 1) "╭" >= 0))
+r35 := test "a dialog carries its title" (-> assert-true (index-of (row-text (dialog ()) 1) "help" >= 0))
+r36 := test "a dialog wraps its body" (-> assert-true (index-of (row-text (dialog ()) 3) "press q to quit" >= 0))
+r37 := test "the screen behind stays visible" (-> assert-eq ".............................." (row-text (dialog ()) 0))
+
+;; Centred and clamped: a modal wider than the terminal is a modal with
+;; no visible edges.
+r38 := test "an oversized modal is clamped to the screen" (-> assert-eq 30 (overlay-rect (rect 0 0 30 9) 999 999).w)
+r39 := test "a modal is centred" (-> assert-eq (rect 10 2 10 5) (overlay-rect (rect 0 0 30 9) 10 5))
+r40 := test "an empty screen draws no modal" (-> assert-eq (buffer 4 2) (draw-modal (buffer 4 2) (rect 0 0 0 0) (dark-theme ()) "t" "b" 10 5))
+
+;; ── Toasts ──────────────────────────────────────────────────────────
+;; No frame: a toast that borrowed a modal's box would read as
+;; something the user has to dismiss.
+
+fn toasted
+  =>
+  draw-toast (buffer 12 3) (rect 0 0 12 3) (style {reverse= true}) "saved"
+
+r41 := test "a toast pins to the bottom row" (-> assert-eq "   saved    " (row-text (toasted ()) 2))
+r42 := test "a toast leaves the rows above alone" (-> assert-true (empty? (buf-line (toasted ()) 1)))
+r43 := test "a toast fills the width" (-> assert-eq 12 (line-width (buf-line (toasted ()) 2)))
+
+summarize #[r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15 r16 r17 r18 r19 r20 r21 r22 r23 r24 r25 r26 r27 r28 r29 r30 r31 r32 r33 r34 r35 r36 r37 r38 r39 r40 r41 r42 r43]

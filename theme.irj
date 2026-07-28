@@ -1,0 +1,133 @@
+mod uzor.theme
+
+use uzor.style {Style style plain grey red green yellow blue magenta cyan white black bright-black bright-white bright-yellow bright-cyan}
+use uzor.box {BoxChars single-box rounded-box double-box heavy-box ascii-box}
+
+;; A named set of styles, so a screenful of widgets shares one palette
+;; instead of each call site inventing its own.
+;;
+;; Widgets still take plain `Style` arguments — a theme is a record the
+;; app pulls from, not a hidden context the widgets consult. Passing
+;; `t.selected` where a style is wanted keeps the widget signature
+;; honest about what it uses, and lets a single widget step outside the
+;; theme without an escape hatch being invented for it.
+;;
+;; The box characters travel with the palette, because they are the
+;; same decision: a terminal that mangles the box-drawing block usually
+;; also wants plain colours.
+
+pub spec Theme
+  normal :: Style
+  muted :: Style
+  accent :: Style
+  selected :: Style
+  border :: Style
+  title :: Style
+  bar-filled :: Style
+  bar-empty :: Style
+  cursor :: Style
+  chars :: BoxChars
+
+;; ── Built-in themes ─────────────────────────────────────────────────
+
+;; The default. Assumes a dark background, which is what a terminal
+;; running a full-screen app usually has.
+pub fn dark-theme :: Theme
+  =>
+  normal := plain
+  muted := style {fg= bright-black}
+  accent := style {fg= cyan}
+  selected := style {reverse= true}
+  border := style {fg= cyan}
+  title := style {fg= bright-cyan bold= true}
+  bar-filled := style {fg= green}
+  bar-empty := style {fg= bright-black}
+  cursor := style {reverse= true}
+  Theme normal muted accent selected border title bar-filled bar-empty cursor (rounded-box ())
+
+;; Same shapes, colours picked to survive on a light background: the
+;; bright variants that read on black wash out on white.
+pub fn light-theme :: Theme
+  =>
+  normal := plain
+  muted := style {fg= (grey 10)}
+  accent := style {fg= blue}
+  selected := style {reverse= true}
+  border := style {fg= blue}
+  title := style {fg= blue bold= true}
+  bar-filled := style {fg= green}
+  bar-empty := style {fg= (grey 18)}
+  cursor := style {reverse= true}
+  Theme normal muted accent selected border title bar-filled bar-empty cursor (rounded-box ())
+
+;; No colour at all, and ASCII box drawing. For a terminal that mangles
+;; the box-drawing block, a pipe that strips escapes, or a user who
+;; asked for it — `NO_COLOR` is a convention worth honouring.
+pub fn mono-theme :: Theme
+  =>
+  normal := plain
+  muted := plain
+  accent := style {bold= true}
+  selected := style {reverse= true}
+  border := plain
+  title := style {bold= true}
+  bar-filled := style {reverse= true}
+  bar-empty := plain
+  cursor := style {reverse= true}
+  Theme normal muted accent selected border title bar-filled bar-empty cursor (ascii-box ())
+
+;; High-contrast, heavy borders. Every distinction carried by weight
+;; and reverse video rather than hue, so it survives colour-blindness
+;; and a badly configured palette alike.
+pub fn high-contrast-theme :: Theme
+  =>
+  normal := style {fg= white}
+  muted := style {fg= white}
+  accent := style {fg= bright-yellow bold= true}
+  selected := style {reverse= true bold= true}
+  border := style {fg= white bold= true}
+  title := style {fg= bright-yellow bold= true}
+  bar-filled := style {fg= white reverse= true}
+  bar-empty := style {fg= white}
+  cursor := style {reverse= true}
+  Theme normal muted accent selected border title bar-filled bar-empty cursor (heavy-box ())
+
+;; ── Choosing one ────────────────────────────────────────────────────
+
+;; A theme by name, for a config file or a `--theme` flag. An unknown
+;; name gives the default rather than an error: a stale name in a
+;; config shouldn't stop the app starting.
+pub fn theme-named :: Str Theme
+  => name
+  if (name == "light")
+    light-theme ()
+  else
+    theme-named-dark name
+
+fn theme-named-dark :: Str Theme
+  => name
+  if (name == "mono")
+    mono-theme ()
+  else
+    theme-named-contrast name
+
+fn theme-named-contrast :: Str Theme
+  => name
+  if (name == "high-contrast")
+    high-contrast-theme ()
+  else
+    dark-theme ()
+
+;; ── Adjusting one ───────────────────────────────────────────────────
+
+;; Themes are records, so an app that likes one but wants a different
+;; accent builds it from the constructor. These two cover the common
+;; cases without spelling out all ten fields.
+
+pub fn with-chars :: Theme BoxChars Theme
+  => t chars
+  Theme t.normal t.muted t.accent t.selected t.border t.title t.bar-filled t.bar-empty t.cursor chars
+
+pub fn with-accent :: Theme Style Theme
+  => t accent
+  Theme t.normal t.muted accent t.selected t.border t.title t.bar-filled t.bar-empty t.cursor t.chars

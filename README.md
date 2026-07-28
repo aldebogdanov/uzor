@@ -326,6 +326,74 @@ rewound too and the second step back would have nowhere to go. It's bounded
 `examples/reactive-todo.irj` is the todo list rebuilt this way, with working
 undo/redo.
 
+## Themes
+
+`uzor.theme` is a named set of styles plus the box characters that go with
+them, so a screenful of widgets shares one palette instead of each call site
+inventing its own.
+
+```irij
+th := theme-named "dark"          ;; or light / mono / high-contrast
+draw-list buf r lv th.normal th.selected
+```
+
+Widgets still take plain `Style` arguments — a theme is a record the app pulls
+from, not a hidden context widgets consult. That keeps each widget's signature
+honest about what it uses, and lets one widget step outside the theme without
+an escape hatch being invented for it.
+
+| theme | |
+|---|---|
+| `dark-theme` | the default; assumes a dark background |
+| `light-theme` | colours that survive on white — the bright variants wash out |
+| `mono-theme` | no colour, ASCII box drawing |
+| `high-contrast-theme` | distinctions by weight and reverse video, not hue |
+
+`theme-named` takes a config string and falls back to the default on an unknown
+name — a stale name in a config shouldn't stop the app starting. `with-chars`
+and `with-accent` adjust one without spelling out all ten fields.
+
+## Mouse
+
+Tracking is off unless asked for: `term-enter {mouse= true}`. Left off, the
+terminal's own selection and copy keep working, which is usually what a user
+wants.
+
+| fn | |
+|---|---|
+| `mouse-press?` / `mouse-release?` | `ev` and a button name |
+| `wheel-up?` / `wheel-down?` | wheel events |
+| `mouse-pos` | `#(col row)`, 0-based like buffer coordinates |
+| `list-hit` / `table-hit` | which item a click landed on, or `()` |
+
+Hit testing lives with the widgets because the widget drew the rows — it knows
+that row `r.y + 3` is item `offset + 3`. An app deriving that itself would
+duplicate the scroll arithmetic and drift the moment the widget changed. A
+click past the last item hits nothing: empty space below a short list is not
+its last row. `table-hit` ignores the header, which is a label rather than a
+row.
+
+## Overlays
+
+There is no z-order to manage, because there is no scene graph to order. A
+frame is a value, and drawing over it is another function applied after the
+first — "on top" is just "later", which is why a modal is three lines and not
+a subsystem.
+
+| fn | |
+|---|---|
+| `dim` / `dim-all` | restyle a region without changing what it says |
+| `draw-overlay` | a framed, cleared region |
+| `draw-modal` | titled panel, wrapped body, centred and clamped |
+| `draw-dialog` | `draw-modal` over a dimmed screen |
+| `draw-toast` | one-line notice pinned to the bottom, no frame |
+
+Dimming preserves the text so the user can still read the context they're being
+asked about. Everything here clears what it covers — a panel that drew only its
+border would leave the old frame showing through its middle. A toast has no box
+on purpose: one that borrowed a modal's frame would read as something you have
+to dismiss.
+
 ## Styles
 
 `style {fg= red bold= true}` fills the rest from the defaults; the result is
@@ -380,7 +448,7 @@ top-level binding named `st` (irij#11), and don't check product-spec fields
 (irij#12).
 
 ```
-irij test        # 244 tests, no terminal required
+irij test        # 288 tests, no terminal required
 ```
 
 ## Examples

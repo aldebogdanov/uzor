@@ -1,6 +1,6 @@
 mod uzor.widgets
 
-use uzor.core {Rect Buffer Style rect rect-bottom rect-right rect-empty? buf-text buf-fill buf-put span}
+use uzor.core {Rect Buffer Style rect rect-bottom rect-right rect-empty? rect-contains? buf-text buf-fill buf-put span}
 use uzor.style {plain cell-width}
 use uzor.text {Align Left Center Right fit truncate ellipsize wrap}
 use uzor.layout {split-h}
@@ -105,6 +105,56 @@ fn draw-row :: Buffer Rect ListView Style Style Int Int Buffer
   => buf r lv st sel-st i idx
   row-st := if (idx == lv.selected) sel-st else st
   buf-text buf (r.y + i) r.x row-st (fit (ellipsize (nth idx lv.items) r.w) r.w (Left))
+
+;; ── Hit testing ─────────────────────────────────────────────────────
+;;
+;; Which item a click landed on. The widget drew the list, so the
+;; widget is what knows that row `r.y + 3` is item `offset + 3` — an
+;; app working that out for itself would be duplicating the scroll
+;; arithmetic and would drift the moment the widget changed.
+;;
+;; `()` when the click missed: outside the region, or on a row past the
+;; end of the items. A click on empty space below a short list is not a
+;; click on its last item.
+
+pub fn list-hit :: Rect ListView Int Int _
+  => r lv col row
+  if (not (rect-contains? r col row))
+    ()
+  else
+    list-index-at lv (row - r.y)
+
+fn list-index-at :: ListView Int _
+  => lv offset-row
+  idx := lv.offset + offset-row
+  if (idx >= (length lv.items))
+    ()
+  else
+    idx
+
+;; The header occupies the first row, so a click there selects nothing
+;; — it is a label, not a row.
+pub fn table-hit :: Rect Table Int Int _
+  => r t col row
+  if (not (rect-contains? r col row))
+    ()
+  else
+    table-index-at t (row - r.y)
+
+fn table-index-at :: Table Int _
+  => t offset-row
+  header-rows := if (empty? t.headers) 0 else 1
+  if (offset-row < header-rows)
+    ()
+  else
+    table-row-at t ((offset-row - header-rows) + t.offset)
+
+fn table-row-at :: Table Int _
+  => t idx
+  if (idx >= (length t.rows))
+    ()
+  else
+    idx
 
 ;; ── Table ───────────────────────────────────────────────────────────
 
