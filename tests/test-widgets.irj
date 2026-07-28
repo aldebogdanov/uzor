@@ -1,0 +1,158 @@
+use std.test :open
+use uzor.core :open
+use uzor.style :open
+use uzor.text :open
+use uzor.layout :open
+use uzor.widgets :open
+
+st := plain
+sel := style {reverse= true}
+
+fn row-text
+  => buf row
+  fold (acc s -> acc ++ s.text) "" (buf-line buf row)
+
+;; ── Labels and paragraphs ───────────────────────────────────────────
+
+r1 := test "a label fills its width" (-> assert-eq "hi        " (row-text (draw-label (buffer 10 1) (rect 0 0 10 1) st "hi" (Left)) 0))
+r2 := test "a label can be centred" (-> assert-eq "    hi    " (row-text (draw-label (buffer 10 1) (rect 0 0 10 1) st "hi" (Center)) 0))
+r3 := test "an over-long label is ellipsized" (-> assert-eq "hello wor…" (row-text (draw-label (buffer 10 1) (rect 0 0 10 1) st "hello world again" (Left)) 0))
+
+fn para
+  =>
+  draw-paragraph (buffer 12 3) (rect 0 0 12 3) st "the quick brown fox jumps over"
+
+r4 := test "a paragraph wraps across rows" (-> assert-eq "the quick" (row-text (para ()) 0))
+r5 := test "a paragraph continues on the next row" (-> assert-eq "brown fox" (row-text (para ()) 1))
+
+;; Lines past the bottom are dropped, not drawn outside the region —
+;; a paragraph that overflowed would scribble on the widget below it.
+fn tall-para
+  =>
+  draw-paragraph (buffer 12 6) (rect 0 0 12 2) st "one two three four five six seven"
+
+r6 := test "a paragraph stops at its height" (-> assert-true (empty? (buf-line (tall-para ()) 2)))
+
+;; ── List ────────────────────────────────────────────────────────────
+
+items := #["alpha" "beta" "gamma" "delta" "epsilon"]
+
+fn listed
+  =>
+  draw-list (buffer 10 3) (rect 0 0 10 3) (list-view items 1 0) st sel
+
+r7 := test "a list draws its items" (-> assert-eq "alpha     " (row-text (listed ()) 0))
+r8 := test "a list stops at its height" (-> assert-true (empty? (buf-line (listed ()) 3)))
+
+;; The highlight is a bar across the region, not a ragged patch behind
+;; the text, so the selection reads at a glance.
+r9 := test "the selected row is padded to full width" (-> assert-eq 10 (line-width (buf-line (listed ()) 1)))
+r10 := test "the selected row carries the selected style" (-> assert-eq true (nth 0 (buf-line (listed ()) 1)).st.reverse)
+r11 := test "unselected rows keep the normal style" (-> assert-eq false (nth 0 (buf-line (listed ()) 0)).st.reverse)
+
+;; A list scrolled past its start draws from the offset.
+fn scrolled
+  =>
+  draw-list (buffer 10 2) (rect 0 0 10 2) (list-view items 3 2) st sel
+
+r12 := test "an offset list starts at the offset" (-> assert-eq "gamma     " (row-text (scrolled ()) 0))
+
+;; ── Scrolling ───────────────────────────────────────────────────────
+;; A pure companion rather than hidden state: a widget that adjusted
+;; its own offset while drawing would put the app's idea of the scroll
+;; position out of step with what it sees.
+
+r13 := test "selection above the window scrolls up" (-> assert-eq 1 (list-scroll (list-view items 1 3) 2).offset)
+r14 := test "selection below the window scrolls down" (-> assert-eq 3 (list-scroll (list-view items 4 0) 2).offset)
+r15 := test "a visible selection doesn't move" (-> assert-eq 1 (list-scroll (list-view items 2 1) 3).offset)
+r16 := test "scrolling never leaves a gap at the end" (-> assert-eq 3 (list-scroll (list-view items 4 99) 2).offset)
+r17 := test "a zero-height window is left alone" (-> assert-eq 7 (list-scroll (list-view items 0 7) 0).offset)
+
+;; The model clamps too, so a selection past the end can't index out.
+r18 := test "an out-of-range selection is clamped" (-> assert-eq 4 (list-view items 99 0).selected)
+r19 := test "an empty list selects nothing" (-> assert-eq 0 (list-view #[] 5 0).selected)
+
+;; ── Table ───────────────────────────────────────────────────────────
+
+fn tbl
+  =>
+  table #["name" "qty"] #[#["apple" "3"] #["pear" "12"]] #[(Fill 1) (Fixed 5)] 0 0
+
+fn drawn-table
+  =>
+  draw-table (buffer 20 3) (rect 0 0 20 3) (tbl ()) (style {bold= true}) st sel
+
+r20 := test "a table draws its header" (-> assert-eq "name           qty  " (row-text (drawn-table ()) 0))
+r21 := test "a table draws its rows below the header" (-> assert-eq "apple          3    " (row-text (drawn-table ()) 1))
+r22 := test "the header carries the header style" (-> assert-eq true (nth 0 (buf-line (drawn-table ()) 0)).st.bold)
+
+;; Columns are the layout constraints, so a table's columns and a
+;; screen's panes are described the same way.
+r23 := test "column widths follow the constraints" (-> assert-eq "12" (substring (row-text (drawn-table ()) 2) 15 17))
+r24 := test "a table stops at its height" (-> assert-true (empty? (buf-line (drawn-table ()) 3)))
+
+;; Table scrolling reserves the header row, or the last row is never
+;; reachable.
+r25 := test "table scrolling accounts for the header" (-> assert-eq 1 (table-scroll (table #["h"] #[#["a"] #["b"] #["c"]] #[(Fill 1)] 2 0) 3).offset)
+
+;; ── Input ───────────────────────────────────────────────────────────
+
+fn field
+  => text cursor width
+  draw-input (buffer 20 1) (rect 0 0 width 1) (input text cursor) st sel
+
+r26 := test "an input draws its text" (-> assert-eq "hello     " (row-text (field "hello" 0 10) 0))
+
+;; The cursor is a reversed cell, not the terminal's own cursor: the
+;; frame stays a value, so a diff of two frames describes everything
+;; that changed.
+r27 := test "the cursor cell is reversed" (-> assert-eq true (nth 0 (buf-line (field "hello" 0 10) 0)).st.reverse)
+r28 := test "the cursor sits at its column" (-> assert-eq "h" (nth 0 (buf-line (field "hello" 0 10) 0)).text)
+r29 := test "a cursor past the text draws on a space" (-> assert-eq " " (nth 1 (buf-line (field "hi" 2 10) 0)).text)
+
+;; A field narrower than its contents scrolls, or the user types blind.
+r30 := test "the window follows the cursor" (-> assert-eq 6 (input-scroll (input "hello world" 11) 6).offset)
+r31 := test "a short value doesn't scroll" (-> assert-eq 0 (input-scroll (input "hi" 2) 10).offset)
+r32 := test "the cursor clamps to the text" (-> assert-eq 5 (input "hello" 99).cursor)
+
+;; ── Progress ────────────────────────────────────────────────────────
+
+fn bar
+  => value total width
+  row-text (draw-progress (buffer 20 1) (rect 0 0 width 1) st st value total) 0
+
+r33 := test "half full is half filled" (-> assert-eq "█████░░░░░" (bar 5 10 10))
+r34 := test "empty is all empty" (-> assert-eq "░░░░░░░░░░" (bar 0 10 10))
+r35 := test "full is all filled" (-> assert-eq "██████████" (bar 10 10 10))
+
+;; A total of zero is a caller dividing by something that turned out
+;; empty — an empty bar, not a crash and not a bar past its region.
+r36 := test "a zero total draws empty" (-> assert-eq "░░░░░░░░░░" (bar 3 0 10))
+r37 := test "over-full clamps" (-> assert-eq "██████████" (bar 99 10 10))
+
+;; The label overlays the bar; padding it to the region would blank the
+;; bar either side of the text.
+fn labelled
+  =>
+  row-text (draw-progress-labelled (buffer 12 1) (rect 0 0 12 1) st st st 3 4) 0
+
+r38 := test "the label sits over the bar" (-> assert-eq "████75%██░░░" (labelled ()))
+r39 := test "a bar too narrow for a label is left bare" (-> assert-eq "██░" (row-text (draw-progress-labelled (buffer 3 1) (rect 0 0 3 1) st st st 2 3) 0))
+
+;; ── Spinner ─────────────────────────────────────────────────────────
+
+r40 := test "the spinner cycles" (-> assert-eq (spinner-frame 0) (spinner-frame 10))
+r41 := test "spinner frames are one cell" (-> assert-eq 1 (cell-width (spinner-frame 3)))
+r42 := test "a negative tick still gives a frame" (-> assert-eq (spinner-frame 0) (spinner-frame (-5)))
+
+;; ── Degenerate regions ──────────────────────────────────────────────
+;; Every widget takes a rect it doesn't control. An empty one draws
+;; nothing rather than reaching outside it.
+
+blank := buffer 10 2
+
+r43 := test "an empty rect draws no label" (-> assert-eq blank (draw-label blank (rect 0 0 0 0) st "hi" (Left)))
+r44 := test "an empty rect draws no list" (-> assert-eq blank (draw-list blank (rect 0 0 0 0) (list-view items 0 0) st sel))
+r45 := test "an empty rect draws no bar" (-> assert-eq blank (draw-progress blank (rect 0 0 10 0) st st 1 2))
+
+summarize #[r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15 r16 r17 r18 r19 r20 r21 r22 r23 r24 r25 r26 r27 r28 r29 r30 r31 r32 r33 r34 r35 r36 r37 r38 r39 r40 r41 r42 r43 r44 r45]

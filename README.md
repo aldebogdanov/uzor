@@ -4,7 +4,7 @@ Terminal UI toolkit for [Irij](https://irij.online). Cell buffers, layout,
 widgets — built on `std.term`'s `Term` effect, with the whole rendering path
 kept pure so a TUI can be tested without a screen.
 
-**v0.1 is the buffer and layout layers.** Widgets and the app loop land next.
+**v0.1 is the buffer, layout and widget layers.** The app loop lands next.
 
 ```irij
 use uzor.core :open
@@ -140,6 +140,58 @@ so a CJK title can't measure a cell over budget and overwrite the corner. Use
 `draw-panel` for anything floating — a modal that only drew its border would
 show the old frame through its middle.
 
+## Text
+
+`uzor.text` fits strings into a fixed number of cells. Everything counts cells,
+never characters — padding with `length` puts a CJK label one column past its
+box and shifts every column after it.
+
+| fn | spec | |
+|---|---|---|
+| `truncate` | `Str Int Str` | first `n` cells; a halved wide glyph becomes a space |
+| `ellipsize` | `Str Int Str` | truncate with `…`, marker inside the budget |
+| `fit` | `Str Int Align Str` | pad **or** truncate to exactly `n` cells |
+| `wrap` | `Str Int Vec` | word-wrap; over-long words break mid-word |
+
+`Align` is `Left` / `Center` / `Right`.
+
+## Widgets
+
+Every widget is a pure `Buffer Rect <model> … Buffer`. They hold no state and
+perform no effects: the model is a value the caller owns, and drawing is a
+function of it. That's what lets a screenful of widgets be asserted on as a
+string.
+
+| fn | |
+|---|---|
+| `draw-label` | one line, aligned, ellipsized to fit |
+| `draw-paragraph` | wrapped text, clipped to the rect's height |
+| `draw-list` | items with a selection bar |
+| `draw-table` | headers + rows; columns are layout constraints |
+| `draw-input` | text with a cursor cell |
+| `draw-progress` / `draw-progress-labelled` | bar from `value`/`total` |
+| `draw-spinner` | braille frame from a tick |
+
+```irij
+lv := list-scroll (list-view items selected offset) r.h
+buf2 := draw-list buf r lv plain (style {reverse= true})
+```
+
+**Scrolling is not hidden inside the widgets.** A list that silently adjusted
+its own offset while drawing would make drawing stateful and put the app's idea
+of the scroll position out of step with what it sees. Each scrollable widget has
+a pure companion — `list-scroll`, `table-scroll`, `input-scroll` — that the app
+calls first. `table-scroll` reserves the header row, or the last row is never
+reachable.
+
+Progress takes `value` and `total` as **integers**, not a ratio: a bar is a
+whole number of cells, and going through a float only adds a rounding step whose
+direction has to be argued about. A total of zero draws an empty bar rather than
+dividing by it.
+
+The input cursor is a reversed cell, not the terminal's own cursor — the frame
+stays a value, so a diff of two frames still describes everything that changed.
+
 ## Styles
 
 `style {fg= red bold= true}` fills the rest from the defaults; the result is
@@ -194,7 +246,7 @@ top-level binding named `st` (irij#11), and don't check product-spec fields
 (irij#12).
 
 ```
-irij test        # 110 tests, no terminal required
+irij test        # 178 tests, no terminal required
 ```
 
 ## License

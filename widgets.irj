@@ -1,0 +1,309 @@
+mod uzor.widgets
+
+use uzor.core {Rect Buffer Style rect rect-bottom rect-right rect-empty? buf-text buf-fill buf-put span}
+use uzor.style {plain cell-width}
+use uzor.text {Align Left Center Right fit truncate ellipsize wrap}
+use uzor.layout {split-h}
+
+;; The widget set.
+;;
+;; Every widget is a pure `Buffer Rect <model> … Buffer`. They hold no
+;; state and perform no effects: the model is a value the caller owns,
+;; and drawing is a function of it. That is what lets a screenful of
+;; widgets be asserted on as a string, and what will let the app loop
+;; in U4 keep the whole UI in one reactive graph.
+;;
+;; Scrolling is deliberately *not* hidden inside the widgets. A list
+;; that silently adjusted its own offset while drawing would make
+;; drawing stateful and put the app's idea of the scroll position out
+;; of step with what it sees. Instead each scrollable widget has a pure
+;; `*-scroll` companion the app calls before drawing.
+
+;; ── Text ────────────────────────────────────────────────────────────
+
+;; One line, clipped and aligned to the rect's width.
+pub fn draw-label :: Buffer Rect Style Str Align Buffer
+  => buf r st s align
+  if (rect-empty? r)
+    buf
+  else
+    buf-text buf r.y r.x st (fit (ellipsize s r.w) r.w align)
+
+;; Wrapped text, clipped to the rect's height. Lines past the bottom
+;; are dropped rather than drawn outside the region.
+pub fn draw-paragraph :: Buffer Rect Style Str Buffer
+  => buf r st s
+  if (rect-empty? r)
+    buf
+  else
+    draw-lines buf r st (wrap s r.w) 0
+
+fn draw-lines :: Buffer Rect Style Vec Int Buffer
+  => buf r st lines i
+  if ((i >= (length lines)) || (i >= r.h))
+    buf
+  else
+    draw-lines (buf-text buf (r.y + i) r.x st (nth i lines)) r st lines (i + 1)
+
+;; ── List ────────────────────────────────────────────────────────────
+
+pub spec ListView
+  items :: Vec
+  selected :: Int
+  offset :: Int
+
+pub fn list-view :: Vec Int Int ListView
+  => items selected offset
+  ListView items (clamp-index selected (length items)) (max 0 offset)
+
+fn clamp-index :: Int Int Int
+  => i n
+  if (n <= 0)
+    0
+  else
+    max 0 (min i (n - 1))
+
+;; Smallest scroll change that brings the selection into a window of
+;; `height` rows. Called by the app before drawing, so the offset it
+;; holds and the offset drawn are always the same value.
+pub fn list-scroll :: ListView Int ListView
+  => lv height
+  if (height <= 0)
+    lv
+  else
+    ListView lv.items lv.selected (scroll-offset lv.selected lv.offset height (length lv.items))
+
+fn scroll-offset :: Int Int Int Int Int
+  => selected offset height total
+  capped := max 0 (min offset (max 0 (total - height)))
+  if (selected < capped)
+    selected
+  else
+    if (selected >= (capped + height))
+      selected - height + 1
+    else
+      capped
+
+pub fn draw-list :: Buffer Rect ListView Style Style Buffer
+  => buf r lv st sel-st
+  if (rect-empty? r)
+    buf
+  else
+    draw-rows buf r lv st sel-st 0
+
+fn draw-rows :: Buffer Rect ListView Style Style Int Buffer
+  => buf r lv st sel-st i
+  idx := lv.offset + i
+  if ((i >= r.h) || (idx >= (length lv.items)))
+    buf
+  else
+    draw-rows (draw-row buf r lv st sel-st i idx) r lv st sel-st (i + 1)
+
+;; The selected row is padded to the full width so its highlight is a
+;; bar across the region rather than a ragged patch behind the text.
+fn draw-row :: Buffer Rect ListView Style Style Int Int Buffer
+  => buf r lv st sel-st i idx
+  row-st := if (idx == lv.selected) sel-st else st
+  buf-text buf (r.y + i) r.x row-st (fit (ellipsize (nth idx lv.items) r.w) r.w (Left))
+
+;; ── Table ───────────────────────────────────────────────────────────
+
+pub spec Table
+  headers :: Vec
+  rows :: Vec
+  widths :: Vec
+  selected :: Int
+  offset :: Int
+
+pub fn table :: Vec Vec Vec Int Int Table
+  => headers rows widths selected offset
+  Table headers rows widths (clamp-index selected (length rows)) (max 0 offset)
+
+pub fn table-scroll :: Table Int Table
+  => t height
+  body := max 0 (height - 1)
+  if (body <= 0)
+    t
+  else
+    Table t.headers t.rows t.widths t.selected (scroll-offset t.selected t.offset body (length t.rows))
+
+;; Column widths come from the same constraint solver the layout uses,
+;; so a table's columns and a screen's panes are described the same way.
+pub fn draw-table :: Buffer Rect Table Style Style Style Buffer
+  => buf r t head-st st sel-st
+  if (rect-empty? r)
+    buf
+  else
+    draw-table-body (draw-header buf r t head-st) r t st sel-st 0
+
+fn draw-header :: Buffer Rect Table Style Buffer
+  => buf r t head-st
+  if (empty? t.headers)
+    buf
+  else
+    draw-cells buf (rect r.x r.y r.w 1) t.widths t.headers head-st
+
+fn draw-table-body :: Buffer Rect Table Style Style Int Buffer
+  => buf r t st sel-st i
+  header-rows := if (empty? t.headers) 0 else 1
+  idx := t.offset + i
+  if (((i + header-rows) >= r.h) || (idx >= (length t.rows)))
+    buf
+  else
+    draw-table-row buf r t st sel-st i idx header-rows
+
+fn draw-table-row :: Buffer Rect Table Style Style Int Int Int Buffer
+  => buf r t st sel-st i idx header-rows
+  row-st := if (idx == t.selected) sel-st else st
+  row-rect := rect r.x (r.y + header-rows + i) r.w 1
+  painted := if (idx == t.selected) (buf-fill buf row-rect sel-st " ") else buf
+  draw-table-body (draw-cells painted row-rect t.widths (nth idx t.rows) row-st) r t st sel-st (i + 1)
+
+fn draw-cells :: Buffer Rect Vec Vec Style Buffer
+  => buf r widths cells st
+  cell-rects := split-h r widths
+  draw-cell-at buf cell-rects cells st 0
+
+fn draw-cell-at :: Buffer Vec Vec Style Int Buffer
+  => buf rects cells st i
+  if ((i >= (length rects)) || (i >= (length cells)))
+    buf
+  else
+    draw-cell-at (draw-one-cell buf (nth i rects) (nth i cells) st) rects cells st (i + 1)
+
+fn draw-one-cell :: Buffer Rect Str Style Buffer
+  => buf cr text st
+  if (cr.w <= 0)
+    buf
+  else
+    buf-text buf cr.y cr.x st (fit (ellipsize text cr.w) cr.w (Left))
+
+;; ── Input ───────────────────────────────────────────────────────────
+
+pub spec Input
+  text :: Str
+  cursor :: Int
+  offset :: Int
+
+pub fn input :: Str Int Input
+  => text cursor
+  Input text (max 0 (min cursor (cell-width text))) 0
+
+;; Keep the cursor inside the visible window. A field narrower than its
+;; contents scrolls horizontally; without this the cursor walks off the
+;; end and the user types blind.
+pub fn input-scroll :: Input Int Input
+  => inp width
+  if (width <= 0)
+    inp
+  else
+    Input inp.text inp.cursor (scroll-offset inp.cursor inp.offset width ((cell-width inp.text) + 1))
+
+;; The cursor is drawn as a reversed cell rather than by moving the
+;; terminal's own cursor: the frame stays a pure value, and a diff of
+;; two frames still describes everything that changed.
+pub fn draw-input :: Buffer Rect Input Style Style Buffer
+  => buf r inp st cursor-st
+  if (rect-empty? r)
+    buf
+  else
+    draw-input-cursor (buf-text buf r.y r.x st (fit (visible-text inp r.w) r.w (Left))) r inp cursor-st
+
+fn visible-text :: Input Int Str
+  => inp width
+  truncate (drop-cells-str inp.text inp.offset) width
+
+fn drop-cells-str :: Str Int Str
+  => s n
+  if (n <= 0)
+    s
+  else
+    substring s (length (truncate s n)) (length s)
+
+fn draw-input-cursor :: Buffer Rect Input Style Buffer
+  => buf r inp cursor-st
+  col := inp.cursor - inp.offset
+  if ((col < 0) || (col >= r.w))
+    buf
+  else
+    buf-put buf r.y (r.x + col) #[(span (cursor-char inp) cursor-st)]
+
+fn cursor-char :: Input Str
+  => inp
+  at := truncate (drop-cells-str inp.text inp.cursor) 1
+  if (at == "")
+    " "
+  else
+    at
+
+;; ── Progress ────────────────────────────────────────────────────────
+
+;; `value` out of `total`, in whole units rather than a ratio. Integer
+;; arithmetic throughout: a terminal bar is a whole number of cells, and
+;; going through a float only adds a rounding step whose direction has
+;; to be argued about. A total of zero draws an empty bar rather than
+;; dividing by it.
+pub fn draw-progress :: Buffer Rect Style Style Int Int Buffer
+  => buf r filled-st empty-st value total
+  if (rect-empty? r)
+    buf
+  else
+    draw-bar buf r filled-st empty-st (filled-cells value total r.w)
+
+fn filled-cells :: Int Int Int Int
+  => value total width
+  if (total <= 0)
+    0
+  else
+    quo ((max 0 (min value total)) * width) total
+
+fn draw-bar :: Buffer Rect Style Style Int Buffer
+  => buf r filled-st empty-st filled
+  with-empty := buf-fill buf r empty-st "░"
+  if (filled <= 0)
+    with-empty
+  else
+    buf-fill with-empty (rect r.x r.y filled r.h) filled-st "█"
+
+;; A bar with its percentage centred on top. The label is drawn over
+;; the bar rather than beside it so the widget still fills exactly the
+;; rect it was given.
+pub fn draw-progress-labelled :: Buffer Rect Style Style Style Int Int Buffer
+  => buf r filled-st empty-st label-st value total
+  bar := draw-progress buf r filled-st empty-st value total
+  if (r.w < 4)
+    bar
+  else
+    overlay-label bar r label-st (percent-label value total)
+
+;; Drawn as a bare span at a computed column, not as a width-padded
+;; string: padding it to the region would blank the bar either side of
+;; the text, which is the whole thing the label sits on.
+fn overlay-label :: Buffer Rect Style Str Buffer
+  => buf r label-st label
+  w := cell-width label
+  if (w > r.w)
+    buf
+  else
+    buf-text buf r.y (r.x + (quo (r.w - w) 2)) label-st label
+
+fn percent-label :: Int Int Str
+  => value total
+  if (total <= 0)
+    "0%"
+  else
+    (to-str (quo ((max 0 (min value total)) * 100) total)) ++ "%"
+
+;; ── Spinner ─────────────────────────────────────────────────────────
+
+;; Braille frames: they animate in place without changing cell width,
+;; so a spinner next to text never shifts it.
+spinner-frames := #["⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏"]
+
+pub fn spinner-frame :: Int Str
+  => tick
+  nth (rem (max 0 tick) (length spinner-frames)) spinner-frames
+
+pub fn draw-spinner :: Buffer Int Int Style Int Buffer
+  => buf row col st tick
+  buf-text buf row col st (spinner-frame tick)

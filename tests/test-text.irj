@@ -1,0 +1,66 @@
+use std.test :open
+use uzor.text :open
+use uzor.style {cell-width}
+
+;; ── Truncating ──────────────────────────────────────────────────────
+
+r1 := test "short strings pass through" (-> assert-eq "hi" (truncate "hi" 10))
+r2 := test "long strings are cut" (-> assert-eq "hel" (truncate "hello" 3))
+r3 := test "cutting to zero gives nothing" (-> assert-eq "" (truncate "hello" 0))
+
+;; A double-width glyph cut in half becomes a space, so the result is
+;; exactly n cells — never n+1, which would push the next column over.
+r4 := test "a wide char cut in half becomes a space" (-> assert-eq 3 (cell-width (truncate "日本" 3)))
+r5 := test "wide chars that fit are kept" (-> assert-eq "日本" (truncate "日本" 4))
+
+;; ── Ellipsis ────────────────────────────────────────────────────────
+
+r6 := test "ellipsis marks a cut" (-> assert-eq "hello wo…" (ellipsize "hello world" 9))
+r7 := test "no ellipsis when it fits" (-> assert-eq "hello" (ellipsize "hello" 5))
+
+;; The marker comes out of the budget. Appended past it, the string
+;; would overflow the region it was measured to fit.
+r8 := test "ellipsized text fits its budget" (-> assert-eq 9 (cell-width (ellipsize "hello world" 9)))
+r9 := test "a one-cell budget still fits" (-> assert-eq 1 (cell-width (ellipsize "hello" 1)))
+
+;; ── Fitting ─────────────────────────────────────────────────────────
+;; Exactly n cells, always. A column that is sometimes 9 and sometimes
+;; 10 cells wide tears the table it sits in.
+
+r10 := test "left pads on the right" (-> assert-eq "hi    " (fit "hi" 6 (Left)))
+r11 := test "right pads on the left" (-> assert-eq "    hi" (fit "hi" 6 (Right)))
+r12 := test "center splits the padding" (-> assert-eq "  hi  " (fit "hi" 6 (Center)))
+r13 := test "center puts the odd cell on the right" (-> assert-eq " hi  " (fit "hi" 5 (Center)))
+r14 := test "over-long text is cut to fit" (-> assert-eq "hell" (fit "hello" 4 (Left)))
+r15 := test "wide text fits exactly" (-> assert-eq 5 (cell-width (fit "日本" 5 (Left))))
+
+;; ── Wrapping ────────────────────────────────────────────────────────
+
+fn wrapped
+  =>
+  wrap "the quick brown fox jumps" 10
+
+r16 := test "wrap breaks at spaces" (-> assert-eq #["the quick" "brown fox" "jumps"] (wrapped ()))
+r17 := test "no line exceeds the width" (-> assert-true (empty? (/? (l -> (cell-width l) > 10) (wrapped ()))))
+r18 := test "text that fits stays one line" (-> assert-eq #["short"] (wrap "short" 20))
+r19 := test "zero width wraps to nothing" (-> assert-true (empty? (wrap "anything" 0)))
+
+;; A word longer than the whole width has to be broken: dropping it
+;; loses data, and leaving it whole overflows the column.
+fn broken
+  =>
+  wrap "supercalifragilistic" 6
+
+r20 := test "an over-long word is broken" (-> assert-eq #["superc" "alifra" "gilist" "ic"] (broken ()))
+r21 := test "broken pieces respect the width" (-> assert-true (empty? (/? (l -> (cell-width l) > 6) (broken ()))))
+
+;; Wrapping by cells, not characters — a CJK line of 3 glyphs is 6
+;; cells, and a character-counting wrapper would fit 6 of them.
+fn cjk
+  =>
+  wrap "日本語のテキストです" 6
+
+r22 := test "wide text wraps by cells" (-> assert-true (empty? (/? (l -> (cell-width l) > 6) (cjk ()))))
+r23 := test "wide text keeps every glyph" (-> assert-eq 10 (fold (a l -> a + (length l)) 0 (cjk ())))
+
+summarize #[r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15 r16 r17 r18 r19 r20 r21 r22 r23]
