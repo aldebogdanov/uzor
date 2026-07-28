@@ -1,0 +1,152 @@
+mod uzor.text
+
+use uzor.core {span span-take}
+use uzor.style {plain cell-width}
+
+;; Fitting strings into a fixed number of cells: truncating, padding,
+;; aligning, wrapping.
+;;
+;; Everything here counts cells, never characters. A widget that pads
+;; with `length` puts a CJK label one column past its box and shifts
+;; every column after it — the bug the whole toolkit measures in cells
+;; to avoid.
+
+;; ── Alignment ───────────────────────────────────────────────────────
+
+pub spec Align
+  Left
+  Center
+  Right
+
+;; ── Truncating ──────────────────────────────────────────────────────
+
+;; First `n` cells. A double-width character cut in half becomes a
+;; space, so the result is exactly `n` cells and never n+1.
+pub fn truncate :: Str Int Str
+  => s n
+  if ((cell-width s) <= n)
+    s
+  else
+    (span-take (span s plain) (max 0 n)).text
+
+;; Truncate with a marker, so a cut-off value reads as cut off rather
+;; than as a different value. The marker eats into the budget: an
+;; ellipsis appended past `n` would overflow the region it was meant
+;; to fit.
+pub fn ellipsize :: Str Int Str
+  => s n
+  if ((cell-width s) <= n)
+    s
+  else
+    ellipsize-hard s n
+
+fn ellipsize-hard :: Str Int Str
+  => s n
+  if (n <= 1)
+    truncate "…" n
+  else
+    (truncate s (n - 1)) ++ "…"
+
+;; ── Padding ─────────────────────────────────────────────────────────
+
+fn txt-spaces :: Int Str
+  => n
+  if (n <= 0)
+    ""
+  else
+    " " ++ (txt-spaces (n - 1))
+
+;; Pad or truncate to exactly `n` cells. "Exactly" is the point: a
+;; column that is sometimes 9 and sometimes 10 cells wide tears the
+;; table it sits in.
+pub fn fit :: Str Int Align Str
+  => s n align
+  w := cell-width s
+  if (w >= n)
+    truncate s n
+  else
+    txt-pad-out s (n - w) align
+
+fn txt-pad-out :: Str Int Align Str
+  => s gap align
+  match align
+    Left => s ++ (txt-spaces gap)
+    Right => (txt-spaces gap) ++ s
+    Center => (txt-spaces (quo gap 2)) ++ s ++ (txt-spaces (gap - (quo gap 2)))
+
+;; ── Wrapping ────────────────────────────────────────────────────────
+
+;; Break `s` into lines of at most `width` cells, at spaces where
+;; possible. A word longer than the whole width is broken mid-word
+;; rather than dropped or left to overflow — a 40-cell URL in a
+;; 20-cell column has no better option.
+pub fn wrap :: Str Int Vec
+  => s width
+  if (width <= 0)
+    #[]
+  else
+    wrap-words (split s " ") width "" #[]
+
+fn wrap-words :: Vec Int Str Vec Vec
+  => words width current acc
+  if (empty? words)
+    txt-flush-line current acc
+  else
+    wrap-step words width current acc
+
+fn wrap-step :: Vec Int Str Vec Vec
+  => words width current acc
+  word := head words
+  candidate := txt-join-words current word
+  if ((cell-width candidate) <= width)
+    wrap-words (tail words) width candidate acc
+  else
+    wrap-break words width current acc
+
+;; The current line is full. Push it, then start the next one with this
+;; word — unless the word doesn't fit on a line of its own, in which
+;; case it is broken across lines.
+fn wrap-break :: Vec Int Str Vec Vec
+  => words width current acc
+  word := head words
+  if ((cell-width word) <= width)
+    wrap-words (tail words) width word (txt-flush-line current acc)
+  else
+    wrap-words (tail words) width "" (txt-break-word word width (txt-flush-line current acc))
+
+fn txt-break-word :: Str Int Vec Vec
+  => word width acc
+  if ((cell-width word) <= width)
+    conj acc word
+  else
+    txt-break-word (txt-drop-cells word width) width (conj acc (truncate word width))
+
+fn txt-drop-cells :: Str Int Str
+  => s n
+  rest := cell-width s
+  if (n >= rest)
+    ""
+  else
+    txt-tail-after s n
+
+;; `truncate` gives the head; the tail is what the head isn't. Done by
+;; measuring rather than by index because UTF-16 offsets and cell
+;; offsets part company at the first wide character.
+fn txt-tail-after :: Str Int Str
+  => s n
+  head-part := truncate s n
+  substring s (length head-part) (length s)
+
+fn txt-join-words :: Str Str Str
+  => current word
+  if (current == "")
+    word
+  else
+    current ++ " " ++ word
+
+fn txt-flush-line :: Str Vec Vec
+  => current acc
+  if (current == "")
+    acc
+  else
+    conj acc current
