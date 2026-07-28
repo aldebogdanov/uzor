@@ -308,6 +308,28 @@ fn repeat-str :: Str Int Str
   else
     s ++ (repeat-str s (n - 1))
 
+;; Re-style a region without changing what it says. The background a
+;; modal floats over, a pane that has lost focus — anything that should
+;; recede while staying readable.
+pub fn buf-restyle :: Buffer Rect Style Buffer
+  => buf r st
+  if (rect-empty? r)
+    buf
+  else
+    restyle-rows buf r st r.y
+
+fn restyle-rows :: Buffer Rect Style Int Buffer
+  => buf r st row
+  if (row >= (rect-bottom r))
+    buf
+  else
+    restyle-rows (restyle-row buf r st row) r st (row + 1)
+
+fn restyle-row :: Buffer Rect Style Int Buffer
+  => buf r st row
+  middle := line-take (line-drop (buf-line buf row) r.x) r.w
+  buf-put buf row r.x (@ (sp -> span sp.text st) middle)
+
 ;; ── Rendering ───────────────────────────────────────────────────────
 
 ;; A line as bytes: each span preceded by its full SGR state, then a

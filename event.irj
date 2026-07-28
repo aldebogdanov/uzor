@@ -87,6 +87,63 @@ fn printable-char-of :: Map Bool
   else
     empty? (get "mods" ev)
 
+;; ── Mouse ───────────────────────────────────────────────────────────
+;;
+;; Mouse reports arrive as `{kind= "mouse" btn= "left" press= true
+;; col= 11 row= 2 mods= #[]}` with 0-based coordinates, matching buffer
+;; coordinates — the wire protocol's 1-based values are converted in
+;; the decoder, so nothing above it has to remember which convention
+;; it is holding.
+;;
+;; Tracking is off unless the app asked for it: `term-enter {mouse=
+;; true}`. Leave it off and the terminal's own selection and copy keep
+;; working, which is usually what a user wants.
+
+pub fn mouse-press? :: Map Str Bool
+  => ev btn
+  if (not (mouse-event? ev))
+    false
+  else
+    pressed-with? ev btn
+
+fn pressed-with? :: Map Str Bool
+  => ev btn
+  if (get "press" ev)
+    (get "btn" ev) == btn
+  else
+    false
+
+pub fn mouse-release? :: Map Bool
+  => ev
+  if (not (mouse-event? ev))
+    false
+  else
+    not (get "press" ev)
+
+pub fn wheel-up? :: Map Bool
+  => ev
+  if (not (mouse-event? ev))
+    false
+  else
+    (get "btn" ev) == "wheel-up"
+
+pub fn wheel-down? :: Map Bool
+  => ev
+  if (not (mouse-event? ev))
+    false
+  else
+    (get "btn" ev) == "wheel-down"
+
+;; Where a mouse event landed, as #(col row). `#(-1 -1)` for anything
+;; that isn't a mouse event, so a caller that forgot to check gets an
+;; obviously-outside position rather than a crash.
+pub fn mouse-pos :: Map Tuple
+  => ev
+  if (not (mouse-event? ev))
+    #((-1) (-1))
+  else
+    #((get "col" ev) (get "row" ev))
+
 ;; ── Keymaps ─────────────────────────────────────────────────────────
 
 ;; A table of #[descriptor message] pairs. Messages are the app's own

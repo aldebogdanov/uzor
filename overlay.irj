@@ -1,0 +1,131 @@
+mod uzor.overlay
+
+use uzor.core {Rect Buffer Style rect rect-empty? rect-bottom buf-restyle buf-text}
+use uzor.style {Style plain}
+use uzor.text {Align Left Center wrap fit}
+use uzor.layout {center inner}
+use uzor.box {BoxChars draw-panel draw-titled-box}
+use uzor.theme {Theme}
+use uzor.widgets {ButtonRow draw-buttons button-rects}
+
+;; Things drawn on top of a finished frame.
+;;
+;; There is no z-order to manage, because there is no scene graph to
+;; order: a frame is a value, and drawing over it is another function
+;; applied after the first. "On top" is just "later", which is why a
+;; modal is three lines and not a subsystem.
+;;
+;; What an overlay does owe the frame beneath it is opacity. A panel
+;; that draws only its border leaves the old content showing through
+;; its middle, so everything here clears what it covers.
+
+;; ── Dimming ─────────────────────────────────────────────────────────
+
+;; Push a region back without hiding it — the usual treatment for what
+;; sits behind a modal. Text is preserved, only the styling changes, so
+;; the user can still read the context they are being asked about.
+pub fn dim :: Buffer Rect Style Buffer
+  => buf r st
+  buf-restyle buf r st
+
+pub fn dim-all :: Buffer Map Style Buffer
+  => buf size st
+  buf-restyle buf (rect 0 0 (get "cols" size) (get "rows" size)) st
+
+;; ── Overlays ────────────────────────────────────────────────────────
+
+;; A framed, cleared region — the shape every floating thing starts
+;; from. Returns the buffer; use `inner` on the same rect for where the
+;; content goes.
+pub fn draw-overlay :: Buffer Rect BoxChars Style Buffer
+  => buf r chars st
+  draw-panel buf r chars st
+
+;; Centred in the region it floats over, clamped so it never escapes:
+;; a modal wider than the terminal is a modal with no visible edges.
+pub fn overlay-rect :: Rect Int Int Rect
+  => screen w h
+  center screen w h
+
+;; ── Modals ──────────────────────────────────────────────────────────
+
+;; A titled panel with wrapped body text, centred on the screen.
+;;
+;; Sized to the content up to the caps the caller gives, so a one-line
+;; message doesn't get a half-screen box and a long one doesn't run off
+;; the edge.
+pub fn draw-modal :: Buffer Rect Theme Str Str Int Int Buffer
+  => buf screen t title body max-w max-h
+  if (rect-empty? screen)
+    buf
+  else
+    place-modal buf screen t title body max-w max-h
+
+fn place-modal :: Buffer Rect Theme Str Str Int Int Buffer
+  => buf screen t title body max-w max-h
+  w := min max-w screen.w
+  lines := wrap body (max 1 (w - 4))
+  h := min (min max-h screen.h) ((length lines) + 4)
+  r := overlay-rect screen w h
+  framed := draw-titled-box (draw-panel buf r t.chars t.border) r t.chars t.border title
+  draw-body framed (inner r) t lines 0
+
+fn draw-body :: Buffer Rect Theme Vec Int Buffer
+  => buf r t lines i
+  if ((i >= (length lines)) || (i >= r.h))
+    buf
+  else
+    draw-body (buf-text buf (r.y + i + 1) (r.x + 1) t.normal (nth i lines)) r t lines (i + 1)
+
+;; A modal over a dimmed screen — the whole gesture in one call, since
+;; dimming and then framing is what every confirmation prompt does.
+pub fn draw-dialog :: Buffer Rect Theme Str Str Int Int Buffer
+  => buf screen t title body max-w max-h
+  draw-modal (dim buf screen t.muted) screen t title body max-w max-h
+
+
+;; ── Dialogs with buttons ────────────────────────────────────────────
+;;
+;; A modal the user answers rather than merely dismisses. The buttons
+;; sit on the bottom row inside the frame, right-aligned, and the
+;; height reserves a row for them plus a blank one above — a button
+;; pressed against the body text reads as part of the sentence.
+;;
+;; The app owns the ButtonRow: it moves the focus with `button-event`,
+;; reads the chosen label back, and decides what that means. Nothing
+;; here knows what "Delete" does.
+
+pub fn draw-buttons-dialog :: Buffer Rect Theme Str Str ButtonRow Int Int Buffer
+  => buf screen t title body row max-w max-h
+  if (rect-empty? screen)
+    buf
+  else
+    place-buttons-dialog (dim buf screen t.muted) screen t title body row max-w max-h
+
+fn place-buttons-dialog :: Buffer Rect Theme Str Str ButtonRow Int Int Buffer
+  => buf screen t title body row max-w max-h
+  w := min max-w screen.w
+  lines := wrap body (max 1 (w - 4))
+  h := min (min max-h screen.h) ((length lines) + 6)
+  r := overlay-rect screen w h
+  framed := draw-titled-box (draw-panel buf r t.chars t.border) r t.chars t.border title
+  bodied := draw-body framed (inner r) t lines 0
+  draw-buttons bodied (buttons-row-rect r) row t.normal t.selected
+
+;; The bottom row inside the frame, inset by one so the buttons don't
+;; touch the border.
+pub fn buttons-row-rect :: Rect Rect
+  => r
+  rect (r.x + 2) ((rect-bottom r) - 2) (max 0 (r.w - 4)) 1
+
+;; ── Toasts ──────────────────────────────────────────────────────────
+
+;; A one-line notice pinned to the bottom of the region, full width.
+;; No frame: a toast that borrowed a modal's box would read as
+;; something the user has to dismiss.
+pub fn draw-toast :: Buffer Rect Style Str Buffer
+  => buf screen st text
+  if (rect-empty? screen)
+    buf
+  else
+    buf-text buf ((rect-bottom screen) - 1) screen.x st (fit text screen.w (Center))

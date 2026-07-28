@@ -5,7 +5,10 @@
 ;;
 ;;   irij run examples/todo.irj
 ;;
-;; j/k or ↑/↓ to move, space to toggle, a to add, f to filter, q to quit.
+;; j/k or ↑/↓ to move, space to toggle, a to add, f to filter,
+;; ? for help, d to delete, q to quit. Click a row to select it; the
+;; wheel scrolls. The delete prompt is answered with its buttons:
+;; ←/→ or tab to move, enter to choose, escape to cancel, or click.
 
 use std.term {default-term}
 use uzor.core :open
@@ -15,7 +18,13 @@ use uzor.layout :open
 use uzor.box :open
 use uzor.widgets :open
 use uzor.event :open
+use uzor.theme :open
+use uzor.overlay :open
 use uzor.app :open
+
+;; One palette for the whole screen. `theme-named` takes a config
+;; string, so a --theme flag would be a one-line change.
+th := theme-named "dark"
 
 ;; ── Model ───────────────────────────────────────────────────────────
 ;;
@@ -34,27 +43,145 @@ fn initial-model :: Map
    hide-done= false
    adding= false
    draft= (input "" 0)
+   helping= false
+   confirming= false
+   answer= (buttons #["Cancel" "Delete"])
+   size= {cols= 80 rows= 24}
    quit= false}
 
 ;; ── Update ──────────────────────────────────────────────────────────
 
 keys := keymap #[#["q" :quit] #["j" :down] #["down" :down] #["k" :up] #["up" :up]
-                 #["space" :toggle] #["f" :filter] #["a" :add]]
+                 #["space" :toggle] #["f" :filter] #["a" :add] #["?" :help] #["d" :delete]]
 
 fn update-model :: Map Map Map
+  => m ev
+  if m.confirming
+    answer-confirm m ev
+  else
+    update-unblocked m ev
+
+;; The dialog owns the keys while it is up — that is what modal means.
+;; The row moves, and a chosen label comes back for the app to act on;
+;; `uzor.widgets` has no idea what "Delete" does.
+fn answer-confirm :: Map Map Map
+  => m ev
+  outcome := if (mouse-event? ev) (button-click m.answer (confirm-buttons-rect m) ev) else (button-event m.answer ev)
+  act-on m (nth 0 outcome) (nth 1 outcome)
+
+fn act-on :: Map _ _ Map
+  => m row chosen
+  if (chosen == "Delete")
+    {...m confirming= false answer= row todos= (without-selected m)}
+  else
+    close-or-keep m row chosen
+
+fn close-or-keep :: Map _ _ Map
+  => m row chosen
+  if ((chosen == :cancel) || (chosen == "Cancel"))
+    {...m confirming= false answer= row}
+  else
+    {...m answer= row}
+
+fn without-selected :: Map Vec
+  => m
+  vis := visible m
+  if (empty? vis)
+    m.todos
+  else
+    /? (t -> (get "text" t) /= (get "text" (nth (min m.sel ((length vis) - 1)) vis))) m.todos
+
+;; The buttons' rect, derived the same way the view derives it.
+fn confirm-buttons-rect :: Map Rect
+  => m
+  screen := rect 0 0 (get "cols" m.size) (get "rows" m.size)
+  buttons-row-rect (overlay-rect screen (min 40 screen.w) (min 8 screen.h))
+
+fn update-unblocked :: Map Map Map
+  => m ev
+  if m.helping
+    dismiss-help m ev
+  else
+    update-open m ev
+
+;; Any key closes the help. A modal that needed a particular key to
+;; dismiss it is a modal people get stuck in.
+fn dismiss-help :: Map Map Map
+  => m ev
+  if (key-event? ev)
+    {...m helping= false}
+  else
+    m
+
+fn update-open :: Map Map Map
   => m ev
   if m.adding
     edit-draft m ev
   else
+    browse-or-click m ev
+
+;; The mouse is routed the same way as a key: an event in, a model out.
+fn browse-or-click :: Map Map Map
+  => m ev
+  if (mouse-event? ev)
+    click m ev
+  else
     browse m ev
+
+;; The list widget knows which item a row is — it drew them, including
+;; the scroll offset. Asking it beats re-deriving that here.
+fn click :: Map Map Map
+  => m ev
+  if (wheel-up? ev)
+    {...m sel= (max 0 (m.sel - 1))}
+  else
+    click-down m ev
+
+fn click-down :: Map Map Map
+  => m ev
+  if (wheel-down? ev)
+    {...m sel= (min (m.sel + 1) (max 0 ((length (visible m)) - 1)))}
+  else
+    click-select m ev
+
+fn click-select :: Map Map Map
+  => m ev
+  if (mouse-press? ev "left")
+    select-hit m ev
+  else
+    m
+
+fn select-hit :: Map Map Map
+  => m ev
+  pos := mouse-pos ev
+  hit := list-hit (inner (list-pane m)) (list-view (@ label-of (visible m)) m.sel m.offset) (nth 0 pos) (nth 1 pos)
+  if (hit == ())
+    m
+  else
+    {...m sel= hit}
+
+;; The list pane's rect, derived the same way the view does it — one
+;; definition, so a click can never land somewhere the drawing didn't.
+fn list-pane :: Map Rect
+  => m
+  nth 0 (split-v (rect 0 0 (get "cols" m.size) (get "rows" m.size)) #[(Fill 1) (Fixed 1) (Fixed 1)])
 
 fn browse :: Map Map Map
   => m ev
   msg := lookup keys ev
   if (msg == ())
-    m
+    note-size m ev
   else
     apply-msg m msg
+
+;; A resize changes where the panes are, so the model keeps the size
+;; the view was last drawn at — click routing reads it.
+fn note-size :: Map Map Map
+  => m ev
+  if (resize-event? ev)
+    {...m size= {cols= (get "cols" ev) rows= (get "rows" ev)}}
+  else
+    m
 
 fn apply-msg :: Map _ Map
   => m msg
@@ -65,6 +192,8 @@ fn apply-msg :: Map _ Map
     :toggle => toggle-selected m
     :filter => {...m hide-done= (not m.hide-done) sel= 0 offset= 0}
     :add => {...m adding= true draft= (input "" 0)}
+    :help => {...m helping= true}
+    :delete => {...m confirming= true answer= (buttons #["Cancel" "Delete"])}
     _ => m
 
 ;; The filtered view is what the user is pointing at, so the selection
@@ -137,12 +266,45 @@ fn view-model :: Map Map Buffer
   rows := split-v screen #[(Fill 1) (Fixed 1) (Fixed 1)]
   listed := draw-todo-pane (buffer size.cols size.rows) (nth 0 rows) m
   statused := draw-status listed (nth 1 rows) m
-  draw-footer statused (nth 2 rows) m
+  footed := draw-footer statused (nth 2 rows) m
+  overlay-modals footed screen m
+
+;; Overlays go on last, over a finished frame — and the confirm sits
+;; over the help if both are somehow up, because it is the one asking
+;; a question.
+fn overlay-modals :: Buffer Rect Map Buffer
+  => buf screen m
+  overlay-confirm (overlay-help buf screen m) screen m
+
+fn overlay-confirm :: Buffer Rect Map Buffer
+  => buf screen m
+  if m.confirming
+    draw-buttons-dialog buf screen th " delete " ("Delete “" ++ (selected-text m) ++ "”?") m.answer (min 40 screen.w) (min 8 screen.h)
+  else
+    buf
+
+fn selected-text :: Map Str
+  => m
+  vis := visible m
+  if (empty? vis)
+    ""
+  else
+    get "text" (nth (min m.sel ((length vis) - 1)) vis)
+
+;; The overlay goes on last, over a finished frame. There is no z-order
+;; to manage because there is no scene graph to order: "on top" is just
+;; "later".
+fn overlay-help :: Buffer Rect Map Buffer
+  => buf screen m
+  if m.helping
+    draw-dialog buf screen th " keys " "j/k or arrows move · space toggles · a adds · f filters · click a row to select it · the wheel scrolls · any key closes this" 44 12
+  else
+    buf
 
 fn draw-todo-pane :: Buffer Rect Map Buffer
   => buf r m
-  framed := draw-titled-box buf r (rounded-box ()) (style {fg= cyan}) " todo "
-  draw-list framed (inner r) (list-scroll (list-view (@ label-of (visible m)) m.sel m.offset) (inner r).h) plain (style {reverse= true})
+  framed := draw-titled-box buf r th.chars th.border " todo "
+  draw-list framed (inner r) (list-scroll (list-view (@ label-of (visible m)) m.sel m.offset) (inner r).h) th.normal th.selected
 
 fn label-of :: Map Str
   => t
@@ -151,19 +313,19 @@ fn label-of :: Map Str
 fn draw-status :: Buffer Rect Map Buffer
   => buf r m
   done-count := length (/? (t -> get "done" t) m.todos)
-  draw-progress-labelled buf r (style {fg= green}) (style {fg= bright-black}) (style {bold= true}) done-count (max 1 (length m.todos))
+  draw-progress-labelled buf r th.bar-filled th.bar-empty th.accent done-count (max 1 (length m.todos))
 
 fn draw-footer :: Buffer Rect Map Buffer
   => buf r m
   if m.adding
-    draw-input buf r (input-scroll m.draft r.w) (style {fg= yellow}) (style {reverse= true})
+    draw-input buf r (input-scroll m.draft r.w) th.accent th.cursor
   else
-    draw-label buf r (style {fg= bright-black}) (footer-text m) (Left)
+    draw-label buf r th.muted (footer-text m) (Left)
 
 fn footer-text :: Map Str
   => m
   filter-note := if (m.hide-done) "  [showing open]" else ""
-  "j/k move · space toggle · a add · f filter · q quit" ++ filter-note
+  "j/k move · space toggle · a add · d delete · f filter · ? help · q quit" ++ filter-note
 
 fn model-done? :: Map Bool
   => m
@@ -173,7 +335,7 @@ fn model-done? :: Map Bool
 
 fn main-flow ::: Term Console
   =>
-  final := run-app (app (initial-model ()) update-model view-model model-done?) {alt-screen= true}
+  final := run-app (app (initial-model ()) update-model view-model model-done?) {alt-screen= true mouse= true}
   open-count := length (/? (t -> not (get "done" t)) (get "todos" final))
   println ("bye — " ++ (to-str open-count) ++ " still open")
 
