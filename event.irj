@@ -1,0 +1,206 @@
+mod uzor.event
+
+;; Turning terminal events into something an app can dispatch on.
+;;
+;; `std.term` hands over events as maps — `{kind= "key" key= "c" ch= "c"
+;; mods= #["ctrl"]}`. Matching on those field by field at every call
+;; site is noise, and gets the modifier order wrong sooner or later.
+;; A key is named by one string here, `"ctrl+c"`, and a keymap is a
+;; table from those names to whatever the app calls a message.
+
+;; ── Key descriptors ─────────────────────────────────────────────────
+
+;; Modifiers in a fixed order, then the key: "ctrl+alt+delete".
+;; Fixed because a descriptor is compared as a string — if the order
+;; floated, "ctrl+shift+tab" and "shift+ctrl+tab" would be different
+;; keys.
+pub fn key-desc :: Map Str
+  => ev
+  if ((get "kind" ev) /= "key")
+    ""
+  else
+    desc-of ev
+
+fn desc-of :: Map Str
+  => ev
+  mods := get "mods" ev
+  if (empty? mods)
+    get "key" ev
+  else
+    (join "+" mods) ++ "+" ++ (get "key" ev)
+
+;; Does this event match a descriptor?
+pub fn key? :: Map Str Bool
+  => ev desc
+  (key-desc ev) == desc
+
+;; ── Event predicates ────────────────────────────────────────────────
+;;
+;; `kind` is a string in the wire format; these keep that spelling in
+;; one place, so an app never compares against a literal that a typo
+;; would silently turn into "never true".
+
+pub fn key-event? :: Map Bool
+  => ev
+  (get "kind" ev) == "key"
+
+pub fn resize-event? :: Map Bool
+  => ev
+  (get "kind" ev) == "resize"
+
+pub fn mouse-event? :: Map Bool
+  => ev
+  (get "kind" ev) == "mouse"
+
+;; Nothing happened before the read timed out. An app loop uses this to
+;; do periodic work (animate a spinner, poll a queue) without treating
+;; the tick as input.
+pub fn idle-event? :: Map Bool
+  => ev
+  (get "kind" ev) == "none"
+
+;; stdin closed — the terminal went away. Distinct from a quit key: no
+;; confirmation prompt is going to be answered.
+pub fn eof-event? :: Map Bool
+  => ev
+  (get "kind" ev) == "eof"
+
+;; A character the app could insert into a text field: a printable key
+;; with no modifier beyond shift (which is already in the character).
+;;
+;; Written as nested ifs rather than a chain of `&&`, because Irij's
+;; `&&` evaluates both sides: an idle or resize event carries no "mods"
+;; field, and the guard that was supposed to stop us looking would not
+;; have run first. A one-line predicate crashed the whole app on the
+;; first timeout tick after entering a text field.
+pub fn printable? :: Map Bool
+  => ev
+  if ((key-event? ev) == false)
+    false
+  else
+    printable-char-of ev
+
+fn printable-char-of :: Map Bool
+  => ev
+  if ((get "ch" ev) == "")
+    false
+  else
+    empty? (get "mods" ev)
+
+;; ── Keymaps ─────────────────────────────────────────────────────────
+
+;; A table of #[descriptor message] pairs. Messages are the app's own
+;; values — keywords, strings, records; the keymap never looks inside
+;; one.
+pub spec Keymap
+  bindings :: Vec
+
+pub fn keymap :: Vec Keymap
+  => bindings
+  Keymap bindings
+
+;; The message bound to this event, or `()` when nothing is. Returning
+;; unit rather than erroring is deliberate: most keys in most apps mean
+;; nothing, and that is not a failure.
+pub fn lookup :: Keymap Map _
+  => km ev
+  find-binding km.bindings (key-desc ev)
+
+fn find-binding :: Vec Str _
+  => bindings desc
+  if ((empty? bindings) || (desc == ""))
+    ()
+  else
+    binding-step bindings desc
+
+fn binding-step :: Vec Str _
+  => bindings desc
+  b := head bindings
+  if ((nth 0 b) == desc)
+    nth 1 b
+  else
+    find-binding (tail bindings) desc
+
+;; First match wins, so a later table can be consulted as a fallback:
+;; component bindings first, then the app's globals.
+pub fn lookup-in :: Vec Map _
+  => keymaps ev
+  if (empty? keymaps)
+    ()
+  else
+    chain-step keymaps ev
+
+fn chain-step :: Vec Map _
+  => keymaps ev
+  hit := lookup (head keymaps) ev
+  if (hit == ())
+    lookup-in (tail keymaps) ev
+  else
+    hit
+
+;; ── Focus ───────────────────────────────────────────────────────────
+;;
+;; A ring of component ids. Which component gets a key is a property of
+;; the app, not of the widgets — widgets draw a model and nothing else,
+;; so the app holds the ring and routes events with it.
+
+pub spec Focus
+  ids :: Vec
+  current :: Int
+
+pub fn focus :: Vec Focus
+  => ids
+  Focus ids 0
+
+;; Wraps at both ends. Tab from the last field returning to the first
+;; is what every form does, and the alternative — stopping dead — reads
+;; as a broken key.
+pub fn focus-next :: Focus Focus
+  => f
+  if (empty? f.ids)
+    f
+  else
+    Focus f.ids (rem (f.current + 1) (length f.ids))
+
+pub fn focus-prev :: Focus Focus
+  => f
+  if (empty? f.ids)
+    f
+  else
+    Focus f.ids (rem ((f.current + (length f.ids)) - 1) (length f.ids))
+
+pub fn focused :: Focus _
+  => f
+  if (empty? f.ids)
+    ()
+  else
+    nth f.current f.ids
+
+pub fn focused? :: Focus _ Bool
+  => f id
+  (focused f) == id
+
+;; Jump straight to a component — a mouse click, or a shortcut that
+;; opens a particular pane. An unknown id leaves the ring alone rather
+;; than focusing nothing.
+pub fn focus-on :: Focus _ Focus
+  => f id
+  idx := index-of-id f.ids id 0
+  if (idx < 0)
+    f
+  else
+    Focus f.ids idx
+
+fn index-of-id :: Vec _ Int Int
+  => ids id i
+  if (i >= (length ids))
+    (-1)
+  else
+    id-step ids id i
+
+fn id-step :: Vec _ Int Int
+  => ids id i
+  if ((nth i ids) == id)
+    i
+  else
+    index-of-id ids id (i + 1)

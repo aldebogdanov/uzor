@@ -4,7 +4,9 @@ Terminal UI toolkit for [Irij](https://irij.online). Cell buffers, layout,
 widgets — built on `std.term`'s `Term` effect, with the whole rendering path
 kept pure so a TUI can be tested without a screen.
 
-**v0.1 is the buffer, layout and widget layers.** The app loop lands next.
+**v0.1 is complete**: buffers, layout, widgets and the app loop. A reactive
+binding on top of [butterfly](https://github.com/aldebogdanov/butterfly) is
+next — see *Reactive state*, below.
 
 ```irij
 use uzor.core :open
@@ -192,6 +194,92 @@ dividing by it.
 The input cursor is a reversed cell, not the terminal's own cursor — the frame
 stays a value, so a diff of two frames still describes everything that changed.
 
+## Events
+
+`uzor.event` names a key with one string. `std.term` hands over
+`{kind= "key" key= "c" mods= #["ctrl"]}`; matching that field by field at every
+call site is noise and gets the modifier order wrong sooner or later.
+
+| fn | |
+|---|---|
+| `key-desc` / `key?` | `"ctrl+c"`, and matching against it |
+| `key-event?` / `resize-event?` / `mouse-event?` / `idle-event?` / `eof-event?` | kind predicates |
+| `printable?` | a character that could go into a text field |
+| `keymap` / `lookup` / `lookup-in` | descriptor → your own message |
+| `focus` / `focus-next` / `focus-prev` / `focus-on` / `focused` / `focused?` | a ring of component ids |
+
+Modifier order is fixed, because descriptors are compared as strings — if it
+floated, `"ctrl+shift+tab"` and `"shift+ctrl+tab"` would be different keys. An
+unbound key yields `()` rather than an error: most keys in most apps mean
+nothing, and that is not a failure. `lookup-in` tries tables in order, so a
+component's bindings can take precedence over the app's globals without either
+knowing about the other.
+
+## The app loop
+
+`uzor.app` is the only module that touches a terminal. Everything below it is a
+pure function of values; this is where those values meet the outside.
+
+```irij
+run-app (app initial-model update view done?) {alt-screen= true}
+```
+
+| | |
+|---|---|
+| `update` | `model event -> model` |
+| `view` | `model size -> Buffer` |
+| `done?` | `model -> Bool` |
+
+`done?` rather than a quit message out of `update`: a message protocol would
+have to be understood by every update fn in every app, and "has this model
+finished" is a question the model can already answer.
+
+`run-app` returns the final model. The terminal is restored on the way out
+**including when the app errors** — a full-screen program that dies without
+restoring leaves the user with an unusable shell.
+
+A resize repaints from scratch rather than diffing, since after a reflow every
+line below the first has moved. The event still reaches `update`, in case the
+app wants to know.
+
+`render-once` draws a model and returns the bytes with no loop and no raw mode
+— for a one-shot report, or for looking at a view in isolation.
+
+### Testing a whole app
+
+`run-app` performs `Term` and nothing else, so an application runs under a mock
+handler with scripted keys and **no terminal at all**:
+
+```irij
+handler script-term :: Term
+  st :! {keys= #["down" "down" "q"]}
+  term-read ms => …            ;; hand back the next key
+  …
+
+fn run
+  =>
+  with script-term
+    run-app (app init update view done?) {}
+
+result := run ()               ;; the model the app finished on
+```
+
+That is what the pure layers below are for. See `tests/test-app.irj`, which
+also covers eof, resize, an app that starts finished, and that the terminal is
+restored after an error.
+
+## Reactive state
+
+Not yet. The plan is a binding onto **butterfly**: model state in signals, the
+view as a `compute`, a `watch` marking the frame dirty, and `batch` giving one
+propagation wave per event.
+
+It is deliberately *not* in this release. The loop above is complete without it,
+and butterfly's graph is a single-threaded singleton — bringing it in adds a
+dependency and a set of constraints (all signal writes on the render fiber;
+background work waking the UI through `term-post`) that deserve their own
+change rather than riding along with the loop.
+
 ## Styles
 
 `style {fg= red bold= true}` fills the rest from the defaults; the result is
@@ -246,8 +334,17 @@ top-level binding named `st` (irij#11), and don't check product-spec fields
 (irij#12).
 
 ```
-irij test        # 178 tests, no terminal required
+irij test        # 224 tests, no terminal required
 ```
+
+## Examples
+
+```
+irij run examples/todo.irj     # needs a tty
+```
+
+A list you can move around, tick off and filter, with a progress bar and a help
+line — about 150 lines, most of it the model.
 
 ## License
 

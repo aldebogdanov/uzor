@@ -1,0 +1,360 @@
+use std.test :open
+use std.term {Term term-enter term-leave term-size term-read term-write term-flush term-post term-str-width}
+use uzor.core :open
+use uzor.style :open
+use uzor.widgets :open
+use uzor.event :open
+use uzor.app :open
+
+;; A whole application, run with no terminal. `run-app` performs Term
+;; and nothing else, so a mock handler with a scripted key sequence
+;; drives it end to end and the model it finishes on is a value.
+;;
+;; NB: handler state is a static singleton in Irij — it is *not*
+;; re-initialised on each `with` entry. A scripted handler therefore
+;; plays its script once per program, so each scenario below runs the
+;; app a single time and asserts several things about the one result.
+
+;; ── A mock terminal that plays a script ─────────────────────────────
+;;
+;; One state slot, so the script and the entered flag travel together.
+;; `entered` mirrors the real capability, which refuses a second
+;; `term-enter` — that is what makes "the terminal was restored"
+;; testable without reading the handler's state.
+
+handler script-term :: Term
+  st :! {keys= #["down" "down" "q"] entered= false}
+  term-enter opts =>
+    st <- {...st entered= true}
+    resume ()
+  term-leave () =>
+    st <- {...st entered= false}
+    resume ()
+  term-size () => resume {cols= 20 rows= 4}
+  term-read ms =>
+    if (empty? (get "keys" st))
+      resume {kind= "eof"}
+    else
+      k := head (get "keys" st)
+      st <- {...st keys= (tail (get "keys" st))}
+      resume {kind= "key" key= k ch= "" mods= #[]}
+  term-post ev => resume ()
+  term-write s => resume ()
+  term-flush () => resume ()
+  term-str-width s => resume (length s)
+
+;; ── The app under test ──────────────────────────────────────────────
+
+items := #["alpha" "beta" "gamma"]
+
+fn tick-update
+  => model ev
+  if (key? ev "q")
+    {...model quit= true}
+  else
+    tick-nav model ev
+
+fn tick-nav
+  => model ev
+  if (key? ev "down")
+    {...model sel= (min (model.sel + 1) 2) steps= (model.steps + 1)}
+  else
+    tick-resized model ev
+
+fn tick-resized
+  => model ev
+  if (resize-event? ev)
+    {...model cols= (get "cols" ev) steps= (model.steps + 1)}
+  else
+    {...model steps= (model.steps + 1)}
+
+fn tick-view
+  => model size
+  draw-list (buffer size.cols size.rows) (rect 0 0 size.cols size.rows) (list-view items model.sel 0) plain (style {reverse= true})
+
+fn tick-done
+  => model
+  model.quit
+
+fn fresh-model
+  =>
+  {sel= 0 steps= 0 quit= false cols= 0}
+
+fn make-app
+  =>
+  app (fresh-model ()) tick-update tick-view tick-done
+
+;; ── Running to completion ───────────────────────────────────────────
+
+fn run-scripted
+  =>
+  with script-term
+    run-app (make-app ()) {}
+
+scripted := run-scripted ()
+
+r1 := test "the loop folds every key into the model" (-> assert-eq 2 (get "sel" scripted))
+r2 := test "the loop stops when done? says so" (-> assert-true (get "quit" scripted))
+;; Two downs counted; the quit key returns a model without touching the
+;; counter, so the loop ran exactly the events it was given.
+r3 := test "every event reached update exactly once" (-> assert-eq 2 (get "steps" scripted))
+
+;; ── EOF ─────────────────────────────────────────────────────────────
+;; stdin closing is not a quit key — there is no confirmation prompt
+;; that is going to be answered.
+
+handler eof-term :: Term
+  st :! {entered= false}
+  term-enter opts =>
+    st <- {...st entered= true}
+    resume ()
+  term-leave () =>
+    st <- {...st entered= false}
+    resume ()
+  term-size () => resume {cols= 10 rows= 2}
+  term-read ms => resume {kind= "eof"}
+  term-post ev => resume ()
+  term-write s => resume ()
+  term-flush () => resume ()
+  term-str-width s => resume (length s)
+
+fn run-eof
+  =>
+  with eof-term
+    run-app (make-app ()) {}
+
+ended := run-eof ()
+
+r4 := test "eof ends the loop" (-> assert-eq false (get "quit" ended))
+r5 := test "eof leaves the model untouched" (-> assert-eq 0 (get "steps" ended))
+
+;; ── An app that starts finished ─────────────────────────────────────
+;; done? is checked before the first read, so a model that is already
+;; done never blocks on input.
+
+fn done-immediately
+  => model
+  true
+
+fn run-already-done
+  =>
+  with eof-term
+    run-app (app {sel= 0 steps= 0 quit= true cols= 0} tick-update tick-view done-immediately) {}
+
+r6 := test "an app that starts done exits at once" (-> assert-eq 0 (get "steps" (run-already-done ())))
+
+;; ── Resize ──────────────────────────────────────────────────────────
+
+handler resize-term :: Term
+  st :! {sent= false}
+  term-enter opts => resume ()
+  term-leave () => resume ()
+  term-size () => resume {cols= 20 rows= 4}
+  term-read ms =>
+    if (get "sent" st)
+      resume {kind= "key" key= "q" ch= "" mods= #[]}
+    else
+      st <- {...st sent= true}
+      resume {kind= "resize" cols= 100 rows= 40}
+  term-post ev => resume ()
+  term-write s => resume ()
+  term-flush () => resume ()
+  term-str-width s => resume (length s)
+
+fn run-resize
+  =>
+  with resize-term
+    run-app (make-app ()) {}
+
+;; The event still reaches update — an app may want to know — and the
+;; loop carries on with the new size.
+resized := run-resize ()
+
+r7 := test "a resize reaches update" (-> assert-eq 100 (get "cols" resized))
+r8 := test "the loop continues after a resize" (-> assert-true (get "quit" resized))
+
+;; ── Restoring the terminal ──────────────────────────────────────────
+;; A full-screen program that dies without restoring leaves the user
+;; with an unusable shell. The mock refuses a second `term-enter` while
+;; entered, exactly as the real capability does — so a second run
+;; succeeding is proof the first one left.
+
+handler strict-term :: Term
+  entered :! false
+  term-enter opts =>
+    if entered
+      resume (error "term-enter: already entered")
+    else
+      entered <- true
+      resume ()
+  term-leave () =>
+    entered <- false
+    resume ()
+  term-size () => resume {cols= 10 rows= 2}
+  ;; Stateless: every read is the quit key, so this handler can be
+  ;; entered any number of times and each run behaves identically.
+  term-read ms => resume {kind= "key" key= "q" ch= "" mods= #[]}
+  term-post ev => resume ()
+  term-write s => resume ()
+  term-flush () => resume ()
+  term-str-width s => resume (length s)
+
+fn run-twice
+  =>
+  with strict-term
+    first := run-app (make-app ()) {}
+    run-app (make-app ()) {}
+
+r9 := test "a clean run restores the terminal" (-> assert-true (get "quit" (run-twice ())))
+
+;; The same guarantee when the app errors: term-leave runs, then the
+;; error propagates.
+fn exploding-update
+  => model ev
+  error "boom"
+
+fn run-error-then-again
+  =>
+  with strict-term
+    crashed := try (-> run-app (app (fresh-model ()) exploding-update tick-view tick-done) {})
+    run-app (make-app ()) {}
+
+r10 := test "an error still restores the terminal" (-> assert-true (get "quit" (run-error-then-again ())))
+
+fn run-error
+  =>
+  with strict-term
+    run-app (app (fresh-model ()) exploding-update tick-view tick-done) {}
+
+r11 := test "the error is re-raised after restoring" (-> assert-throws (-> run-error ()))
+
+;; ── Idle ticks ──────────────────────────────────────────────────────
+;; `term-read` returns {kind= "none"} whenever it times out, which in a
+;; live app is most of the time. An update that assumed every event
+;; carried key fields crashed on the first tick — this drives one
+;; through the loop so that can't ship again.
+
+handler idle-term :: Term
+  sent :! false
+  term-enter opts => resume ()
+  term-leave () => resume ()
+  term-size () => resume {cols= 10 rows= 2}
+  term-read ms =>
+    if sent
+      resume {kind= "key" key= "q" ch= "q" mods= #[]}
+    else
+      sent <- true
+      resume {kind= "none"}
+  term-post ev => resume ()
+  term-write s => resume ()
+  term-flush () => resume ()
+  term-str-width s => resume (length s)
+
+;; An update that pokes at the fields a key event would have.
+fn typing-update
+  => model ev
+  if (key? ev "q")
+    {...model quit= true}
+  else
+    count-if-printable model ev
+
+fn count-if-printable
+  => model ev
+  if (printable? ev)
+    {...model steps= (model.steps + 1)}
+  else
+    model
+
+fn run-idle
+  =>
+  with idle-term
+    run-app (app (fresh-model ()) typing-update tick-view tick-done) {}
+
+idled := run-idle ()
+
+r14 := test "an idle tick passes through update unharmed" (-> assert-true (get "quit" idled))
+r15 := test "an idle tick is not mistaken for input" (-> assert-eq 0 (get "steps" idled))
+
+;; ── Autowrap ────────────────────────────────────────────────────────
+;; A frame is exactly `cols` cells per row, so every full-width row
+;; writes the bottom-right cell — which scrolls the screen when
+;; autowrap is on, taking the top line with it and leaving the border a
+;; column short. The handler hands its capture back through an event,
+;; since handler state can't be read from outside.
+
+handler capture-term :: Term
+  trace :! {wrote= "" done= false}
+  term-enter opts => resume ()
+  term-leave () => resume ()
+  term-size () => resume {cols= 8 rows= 2}
+  term-read ms =>
+    if (get "done" trace)
+      resume {kind= "key" key= "q" ch= "q" mods= #[]}
+    else
+      trace <- {...trace done= true}
+      resume {kind= "app" wrote= (get "wrote" trace)}
+  term-post ev => resume ()
+  term-write s =>
+    trace <- {...trace wrote= ((get "wrote" trace) ++ s)}
+    resume ()
+  term-flush () => resume ()
+  term-str-width s => resume (length s)
+
+fn capture-update
+  => model ev
+  if ((get "kind" ev) == "app")
+    {...model note= (get "wrote" ev)}
+  else
+    tick-update model ev
+
+fn run-capture
+  =>
+  with capture-term
+    run-app (app {sel= 0 steps= 0 quit= false cols= 0 note= ""} capture-update tick-view tick-done) {}
+
+captured := run-capture ()
+
+r16 := test "autowrap is disabled before drawing" (-> assert-true (index-of (get "note" captured) "?7l" >= 0))
+
+;; ── Longevity ───────────────────────────────────────────────────────
+;; The loop must be one self-recursive fn. Split across a chain of
+;; helpers it still passes every test above — and then dies of
+;; StackOverflow after a couple of thousand events, which is minutes of
+;; real use. 20 000 is far past where the broken shape gave out (~2000).
+
+handler firehose :: Term
+  term-enter opts => resume ()
+  term-leave () => resume ()
+  term-size () => resume {cols= 10 rows= 2}
+  term-read ms => resume {kind= "key" key= "x" ch= "x" mods= #[]}
+  term-post ev => resume ()
+  term-write s => resume ()
+  term-flush () => resume ()
+  term-str-width s => resume (length s)
+
+fn counting-update
+  => model ev
+  {...model steps= (model.steps + 1)}
+
+fn twenty-thousand
+  => model
+  model.steps >= 20000
+
+fn run-long
+  =>
+  with firehose
+    run-app (app (fresh-model ()) counting-update tick-view twenty-thousand) {}
+
+r16b := test "the loop survives a long session" (-> assert-eq 20000 (get "steps" (run-long ())))
+
+;; ── render-once ─────────────────────────────────────────────────────
+;; A view drawn with no loop and no terminal at all.
+
+fn one-shot
+  =>
+  render-once (make-app ()) {sel= 1 steps= 0 quit= false cols= 0} {cols= 10 rows= 2}
+
+r17 := test "render-once produces bytes" (-> assert-true (length (one-shot ()) > 0))
+r18 := test "render-once draws the model" (-> assert-true (index-of (one-shot ()) "beta" >= 0))
+
+summarize #[r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r14 r15 r16 r16b r17 r18]

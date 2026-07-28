@@ -331,7 +331,7 @@ fn render-rows :: Buffer Int Str Str
   if (row >= buf.rows)
     acc
   else
-    render-rows buf (row + 1) (acc ++ (move-to (row + 1) 1) ++ (render-line (buf-line buf row)) ++ (csi "K"))
+    render-rows buf (row + 1) (acc ++ (clear-row (row + 1)) ++ (render-line (buf-line buf row)))
 
 ;; Cursor addressing is 1-based, buffers are 0-based; the conversion
 ;; happens here and nowhere else.
@@ -356,6 +356,23 @@ fn diff-rows :: Buffer Buffer Int Str Str
   else
     diff-rows prev next (row + 1) (acc ++ (diff-row prev next row))
 
+;; Park the cursor at the start of a row and blank it, *before* the
+;; content goes down.
+;;
+;; Erase-to-end-of-line after the content is the obvious order and it
+;; is wrong: a full-width row leaves the cursor on its last column, so
+;; the erase wipes the character just written there. Every right-hand
+;; border in the toolkit went missing that way, on every row, while the
+;; frame value itself was perfectly correct — which is exactly the kind
+;; of bug the pure layers cannot catch.
+;;
+;; The reset in the middle matters too: erase-to-end-of-line paints
+;; with the current background, so without it a coloured span from the
+;; previous row would smear across the blank part of this one.
+fn clear-row :: Int Str
+  => row
+  (move-to row 1) ++ (csi "0m") ++ (csi "K")
+
 fn diff-row :: Buffer Buffer Int Str
   => prev next row
   was := render-line (buf-line prev row)
@@ -363,4 +380,4 @@ fn diff-row :: Buffer Buffer Int Str
   if (was == now)
     ""
   else
-    (move-to (row + 1) 1) ++ now ++ (csi "K")
+    (clear-row (row + 1)) ++ now

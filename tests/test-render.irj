@@ -54,6 +54,25 @@ r8 := test "a full render clears the screen first" (-> assert-eq 0 (index-of (fu
 r9 := test "a full render addresses every row" (-> assert-true (index-of (full-frame ()) (csi "2;1H") >= 0))
 r10 := test "a full render erases each line's tail" (-> assert-true (index-of (full-frame ()) (csi "K") >= 0))
 
+;; ── The last cell ───────────────────────────────────────────────────
+;; A row is blanked *before* its content, never after. The obvious
+;; order — content, then erase-to-end-of-line — wipes the character
+;; just written into the last column, because that is where the cursor
+;; is left. Every right-hand border went missing that way while the
+;; buffer itself was perfectly correct.
+
+fn full-row
+  =>
+  buf-render (buf-text (buffer 3 1) 0 0 st "abc")
+
+r7b := test "the erase comes before the content" (-> assert-true (index-of (full-row ()) (csi "K") < index-of (full-row ()) "abc"))
+r7c := test "a full-width row keeps its last cell" (-> assert-true (ends-with? (full-row ()) ("abc" ++ (sgr st))))
+
+;; The reset between the move and the erase matters: erase-to-end-of-
+;; line paints with the current background, so a coloured span from the
+;; row before would otherwise smear across the blank part of this one.
+r7d := test "the row is reset before it is erased" (-> assert-true (index-of (full-row ()) ((csi "0m") ++ (csi "K")) >= 0))
+
 ;; ── buf-diff ────────────────────────────────────────────────────────
 
 fn same-frame
@@ -63,6 +82,12 @@ fn same-frame
 ;; The property the whole render loop rests on: an unchanged frame
 ;; costs zero bytes, so an idle app is silent.
 r11 := test "identical frames diff to nothing" (-> assert-eq "" (same-frame ()))
+
+fn diffed-full-row
+  =>
+  buf-diff (buffer 3 1) (buf-text (buffer 3 1) 0 0 st "abc")
+
+r7e := test "a diffed row also keeps its last cell" (-> assert-true (ends-with? (diffed-full-row ()) ("abc" ++ (sgr st))))
 
 fn changed-row
   =>
@@ -95,6 +120,8 @@ fn cleared-row
 
 ;; Erasing content is the case a naive diff misses: the new line is
 ;; empty, so only the erase-to-end-of-line actually removes anything.
-r18 := test "an emptied row is erased" (-> assert-eq ((move-to 1 1) ++ (csi "K")) (cleared-row ()))
+;; The reset sits between the two so the erase paints with the default
+;; background rather than whatever colour was last set.
+r18 := test "an emptied row is erased" (-> assert-eq ((move-to 1 1) ++ (csi "0m") ++ (csi "K")) (cleared-row ()))
 
-summarize #[r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15 r16 r17 r18]
+summarize #[r1 r2 r3 r4 r5 r6 r7 r7b r7c r7d r7e r8 r9 r10 r11 r12 r13 r14 r15 r16 r17 r18]

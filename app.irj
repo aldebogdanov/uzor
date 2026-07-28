@@ -1,0 +1,145 @@
+mod uzor.app
+
+use std.term {Term term-enter term-leave term-size term-read term-write term-flush csi}
+use uzor.core {Buffer buffer buf-render buf-diff}
+use uzor.event {resize-event? eof-event?}
+
+;; The app loop — the one place in uzor that touches a terminal.
+;;
+;; Everything below this module is a pure function of values, and this
+;; is where those values meet the outside: read an event, fold it into
+;; the model, draw the model, send the difference. The loop itself
+;; holds no state beyond what it passes to itself.
+;;
+;; ── Shape ──
+;;
+;; An app is four functions over a model the app defines:
+;;
+;;   update  model event -> model
+;;   view    model size  -> Buffer
+;;   done?   model       -> Bool
+;;
+;; `done?` rather than a quit message from `update`: a message protocol
+;; would have to be understood by every update fn in every app, and
+;; "has this model finished" is a question the model can already answer.
+;;
+;; ── Testing ──
+;;
+;; `run-app` performs `Term` and nothing else, so a whole application
+;; runs under `mock-term` with scripted keys and no terminal — the
+;; frames it would have drawn are strings, and the model it ends on is
+;; a value. That is the reason the layers below are pure.
+
+pub spec App
+  init :: _
+  update :: Fn
+  view :: Fn
+  done? :: Fn
+
+pub fn app :: _ Fn Fn Fn App
+  => init update view done?
+  App init update view done?
+
+;; ── Running ─────────────────────────────────────────────────────────
+;;
+;; Autowrap (DECAWM) is turned off for the duration. A frame is exactly
+;; `cols` cells per row, so every full-width row writes the last
+;; column, and a stray write past it would scroll the whole screen.
+;; Restored on the way out, since a shell with autowrap disabled is
+;; unusable.
+;;
+;; This is insurance, not the fix for the missing right-hand border —
+;; that was an erase-to-end-of-line emitted *after* the row's content
+;; (see `clear-row` in uzor.core), which wiped the last cell whatever
+;; autowrap was doing.
+
+;; Run until `done?` says otherwise; returns the final model.
+;;
+;; `opts` goes to `term-enter` — `{alt-screen= cursor= mouse=}`. The
+;; terminal is restored on the way out, including when the app errors:
+;; a full-screen program that dies without restoring leaves the user
+;; with an unusable shell.
+pub fn run-app :: App Map _ ::: Term
+  => a opts
+  term-enter opts
+  term-write (csi "?7l")
+  term-flush ()
+  result := try (-> run-guarded a)
+  term-write (csi "?7h")
+  term-flush ()
+  term-leave ()
+  match result
+    Ok model => model
+    Err msg => error msg
+
+fn run-guarded :: App _ ::: Term
+  => a
+  size := term-size ()
+  if (a.done? a.init)
+    a.init
+  else
+    loop-app a a.init (draw-frame a a.init size (blank-of size) true) size
+
+;; The loop, as ONE self-recursive function.
+;;
+;; That shape is load-bearing, not style. A direct tail self-call is
+;; compiled to a jump even across an effect perform, but a chain —
+;; loop → step → dispatch → advance → loop — is not: the state
+;; machine's continuation stack then grows by a frame per event, and
+;; the app dies of StackOverflow after a couple of thousand
+;; keystrokes. That is minutes of use, and it shipped looking fine in
+;; every test that pressed a handful of keys.
+;;
+;; Effectful *helpers* are fine — only the recursion has to be direct.
+fn loop-app :: App _ Buffer Map _ ::: Term
+  => a model prev size
+  ev := term-read 50
+  size2 := size-after ev size
+  model2 := next-model a model ev
+  if ((eof-event? ev) || (a.done? model2))
+    model2
+  else
+    loop-app a model2 (draw-frame a model2 size2 prev (resize-event? ev)) size2
+
+;; stdin closing is not a quit key, and there is no confirmation prompt
+;; that is going to be answered — the model is handed back untouched.
+fn next-model :: App _ Map _
+  => a model ev
+  if (eof-event? ev)
+    model
+  else
+    a.update model ev
+
+fn size-after :: Map Map Map
+  => ev size
+  if (resize-event? ev)
+    {cols= (get "cols" ev) rows= (get "rows" ev)}
+  else
+    size
+
+;; One frame. `full?` forces a repaint from nothing: for the first
+;; frame there is nothing on screen yet, and after a resize everything
+;; below the first reflowed line has moved, so there is no previous
+;; frame worth diffing against.
+fn draw-frame :: App _ Map Buffer Bool Buffer ::: Term
+  => a model size prev full?
+  buf := a.view model size
+  if full?
+    term-write (buf-render buf)
+  else
+    term-write (buf-diff prev buf)
+  term-flush ()
+  buf
+
+fn blank-of :: Map Buffer
+  => size
+  buffer (get "cols" size) (get "rows" size)
+
+;; ── Running one frame ───────────────────────────────────────────────
+
+;; Draw a model once and return the bytes, without a loop and without
+;; entering raw mode. For a one-shot report, and for testing a view in
+;; isolation: no terminal is involved at all.
+pub fn render-once :: App _ Map Str
+  => a model size
+  buf-render (a.view model size)
