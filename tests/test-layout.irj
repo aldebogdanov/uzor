@@ -1,0 +1,96 @@
+use std.test :open
+use uzor.core :open
+use uzor.layout :open
+
+;; ── The invariant ───────────────────────────────────────────────────
+;; Sizes sum to exactly the region. Everything else in the toolkit
+;; assumes it: a split that loses a cell to rounding leaves a column of
+;; stale pixels down the screen that nothing ever redraws.
+
+fn sum-of
+  => sizes
+  fold (a b -> a + b) 0 sizes
+
+r1 := test "fill split sums exactly" (-> assert-eq 100 (sum-of (solve 100 #[(Fill 1) (Fill 1) (Fill 1)])))
+r2 := test "awkward width sums exactly" (-> assert-eq 97 (sum-of (solve 97 #[(Fill 1) (Fill 1) (Fill 1)])))
+r3 := test "mixed constraints sum exactly" (-> assert-eq 80 (sum-of (solve 80 #[(Fixed 7) (Percent 25) (Fill 1) (Fill 2)])))
+r4 := test "single fill takes everything" (-> assert-eq #[42] (solve 42 #[(Fill 1)]))
+
+;; ── Individual constraints ──────────────────────────────────────────
+
+r5 := test "fixed takes its size" (-> assert-eq #[20 80] (solve 100 #[(Fixed 20) (Fill 1)]))
+r6 := test "percent is of the whole" (-> assert-eq #[30 70] (solve 100 #[(Percent 30) (Fill 1)]))
+r7 := test "fill weights split the remainder" (-> assert-eq #[20 40] (solve 60 #[(Fill 1) (Fill 2)]))
+r8 := test "three fills, last absorbs rounding" (-> assert-eq #[33 33 34] (solve 100 #[(Fill 1) (Fill 1) (Fill 1)]))
+
+;; Min asks for its bound and then shares like a fill; Max shares like
+;; a fill but stops at its bound.
+;; The floor only bites when something else wants the space: a Min
+;; next to a greedy Fixed keeps its bound and the Fixed gives way.
+r9 := test "min holds its floor under pressure" (-> assert-eq #[30 70] (solve 100 #[(Min 30) (Fixed 80)]))
+r10 := test "min still shares the remainder" (-> assert-eq 65 (nth 0 (solve 100 #[(Min 30) (Fill 1)])))
+r11 := test "max is a ceiling" (-> assert-eq 15 (nth 0 (solve 100 #[(Max 15) (Fill 1)])))
+
+;; ── Over-subscription ───────────────────────────────────────────────
+;; A region can be asked for more than it has — a fixed sidebar in a
+;; narrow terminal. Earlier children win, later ones collapse to zero.
+;; Never a negative size: that would draw a rect inside-out.
+
+r12 := test "over-subscribed clamps to the total" (-> assert-eq #[10 0] (solve 10 #[(Fixed 20) (Fill 1)]))
+r13 := test "over-subscribed never goes negative" (-> assert-eq #[5 0 0] (solve 5 #[(Fixed 5) (Fixed 5) (Fixed 5)]))
+r14 := test "exactly subscribed is untouched" (-> assert-eq #[5 5] (solve 10 #[(Fixed 5) (Fixed 5)]))
+
+;; ── Degenerate input ────────────────────────────────────────────────
+
+r15 := test "no constraints, no sizes" (-> assert-true (empty? (solve 100 #[])))
+r16 := test "zero width still returns a size per child" (-> assert-eq 2 (length (solve 0 #[(Fill 1) (Fill 1)])))
+r17 := test "all fixed, no filler, keeps its sizes" (-> assert-eq #[3 4] (solve 100 #[(Fixed 3) (Fixed 4)]))
+
+;; ── split-h / split-v ───────────────────────────────────────────────
+
+fn cols
+  =>
+  split-h (rect 0 0 100 10) #[(Fixed 20) (Fill 1) (Fill 1)]
+
+r18 := test "split-h yields one rect per constraint" (-> assert-eq 3 (length (cols ())))
+r19 := test "split-h children are contiguous" (-> assert-eq 20 (nth 1 (cols ())).x)
+r20 := test "split-h keeps the full height" (-> assert-eq 10 (nth 1 (cols ())).h)
+r21 := test "split-h ends flush with the parent" (-> assert-eq 100 (rect-right (nth 2 (cols ()))))
+
+fn rows
+  =>
+  split-v (rect 5 5 40 9) #[(Fixed 3) (Fill 1)]
+
+r22 := test "split-v stacks from the top" (-> assert-eq 5 (nth 0 (rows ())).y)
+r23 := test "split-v children are contiguous" (-> assert-eq 8 (nth 1 (rows ())).y)
+r24 := test "split-v keeps the parent's x" (-> assert-eq 5 (nth 1 (rows ())).x)
+r25 := test "split-v ends flush with the parent" (-> assert-eq 14 (rect-bottom (nth 1 (rows ()))))
+
+;; Nesting the two directions is how every non-trivial layout is built.
+fn nested
+  =>
+  main-cols := split-h (rect 0 0 80 24) #[(Fixed 20) (Fill 1)]
+  split-v (nth 1 main-cols) #[(Fixed 1) (Fill 1) (Fixed 1)]
+
+r26 := test "nested split stays inside its parent" (-> assert-eq 20 (nth 0 (nested ())).x)
+r27 := test "nested split sums to the parent" (-> assert-eq 24 (sum-of (@ (r -> r.h) (nested ()))))
+
+;; ── Placement ───────────────────────────────────────────────────────
+
+r28 := test "center centres" (-> assert-eq (rect 25 5 50 10) (center (rect 0 0 100 20) 50 10))
+r29 := test "center clamps to the parent" (-> assert-eq (rect 0 0 10 4) (center (rect 0 0 10 4) 999 999))
+r30 := test "center respects the parent's origin" (-> assert-eq 12 (center (rect 10 0 10 2) 6 2).x)
+
+r31 := test "pad insets each side" (-> assert-eq (rect 2 1 96 18) (pad (rect 0 0 100 20) 1 2 1 2))
+r32 := test "over-padding empties rather than inverting" (-> assert-true (rect-empty? (pad (rect 0 0 4 4) 3 3 3 3)))
+r33 := test "inner is a one-cell inset" (-> assert-eq (rect 1 1 8 8) (inner (rect 0 0 10 10)))
+
+;; ── Specs are enforced at the boundary ──────────────────────────────
+
+fn bad-rect
+  =>
+  split-h {x= 0 y= 0 w= 10} #[(Fill 1)]
+
+r34 := test "a malformed rect is rejected" (-> assert-throws (-> bad-rect ()))
+
+summarize #[r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15 r16 r17 r18 r19 r20 r21 r22 r23 r24 r25 r26 r27 r28 r29 r30 r31 r32 r33 r34]

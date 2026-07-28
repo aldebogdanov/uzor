@@ -1,0 +1,116 @@
+mod uzor.box
+
+use uzor.core {Rect Buffer rect rect-right rect-bottom rect-empty? buf-text buf-fill span span-take}
+use uzor.style {Style plain cell-width}
+
+;; Borders — the one drawing primitive layout can't do without, since
+;; `inner` only means something if something drew the frame around it.
+;;
+;; Kept apart from uzor.core (which knows only cells and diffs) and
+;; from the widget set (which will know about state and focus). A box
+;; is a pure buffer-to-buffer function like every other draw.
+
+;; ── Line sets ───────────────────────────────────────────────────────
+;;
+;; Order is: top-left, top, top-right, left, right, bottom-left,
+;; bottom, bottom-right.
+
+pub spec BoxChars
+  tl :: Str
+  t :: Str
+  tr :: Str
+  l :: Str
+  r :: Str
+  bl :: Str
+  b :: Str
+  br :: Str
+
+pub fn single-box :: BoxChars
+  =>
+  BoxChars "┌" "─" "┐" "│" "│" "└" "─" "┘"
+
+pub fn rounded-box :: BoxChars
+  =>
+  BoxChars "╭" "─" "╮" "│" "│" "╰" "─" "╯"
+
+pub fn double-box :: BoxChars
+  =>
+  BoxChars "╔" "═" "╗" "║" "║" "╚" "═" "╝"
+
+pub fn heavy-box :: BoxChars
+  =>
+  BoxChars "┏" "━" "┓" "┃" "┃" "┗" "━" "┛"
+
+;; ASCII fallback, for a terminal or font that mangles the box-drawing
+;; block. Same shape, so a caller swaps the set and nothing else.
+pub fn ascii-box :: BoxChars
+  =>
+  BoxChars "+" "-" "+" "|" "|" "+" "-" "+"
+
+;; ── Drawing ─────────────────────────────────────────────────────────
+
+;; A border around the edge of `r`. Anything narrower or shorter than
+;; two cells has no inside, so nothing is drawn rather than the two
+;; sides overlapping into a smear.
+pub fn draw-box :: Buffer Rect BoxChars Style Buffer
+  => buf r chars st
+  if ((r.w < 2) || (r.h < 2))
+    buf
+  else
+    draw-sides buf r chars st
+
+fn draw-sides :: Buffer Rect BoxChars Style Buffer
+  => buf r chars st
+  top := buf-text buf r.y r.x st (chars.tl ++ (repeat-str chars.t (r.w - 2)) ++ chars.tr)
+  bottom := buf-text top (rect-bottom r - 1) r.x st (chars.bl ++ (repeat-str chars.b (r.w - 2)) ++ chars.br)
+  draw-edges bottom r chars st (r.y + 1)
+
+fn draw-edges :: Buffer Rect BoxChars Style Int Buffer
+  => buf r chars st row
+  if (row >= ((rect-bottom r) - 1))
+    buf
+  else
+    draw-edges (buf-text (buf-text buf row r.x st chars.l) row ((rect-right r) - 1) st chars.r) r chars st (row + 1)
+
+fn repeat-str :: Str Int Str
+  => s n
+  if (n <= 0)
+    ""
+  else
+    s ++ (repeat-str s (n - 1))
+
+;; A box with a title let into the top edge. The title is truncated to
+;; what the edge can hold — a long title must not push the corner off
+;; the end and unbalance the frame.
+pub fn draw-titled-box :: Buffer Rect BoxChars Style Str Buffer
+  => buf r chars st title
+  boxed := draw-box buf r chars st
+  if ((r.w < 5) || (title == ""))
+    boxed
+  else
+    buf-text boxed r.y (r.x + 1) st (fit-title title (r.w - 2))
+
+;; Space-padded so the border shows through on both sides of the text.
+;;
+;; Truncation goes through `span-take`, not `substring`: the budget is
+;; in cells, and a title ending in a double-width glyph would otherwise
+;; measure one cell longer than it was allowed and overwrite the
+;; corner. The ellipsis and its trailing space are reserved out of the
+;; budget for the same reason.
+fn fit-title :: Str Int Str
+  => title max-cells
+  padded := " " ++ title ++ " "
+  if ((cell-width padded) <= max-cells)
+    padded
+  else
+    (span-take (span padded plain) (max 0 (max-cells - 2))).text ++ "… "
+
+;; Border plus a cleared interior — a panel that hides whatever was
+;; underneath it. Modals and dropdowns need this; drawing only the
+;; border would leave the old frame showing through.
+pub fn draw-panel :: Buffer Rect BoxChars Style Buffer
+  => buf r chars st
+  if (rect-empty? r)
+    buf
+  else
+    draw-box (buf-fill buf r st " ") r chars st
