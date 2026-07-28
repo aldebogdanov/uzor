@@ -38,6 +38,14 @@ r12 := test "a plain letter is printable" (-> assert-true (printable? plain-a))
 r13 := test "a modified letter is not printable" (-> assert-eq false (printable? key-c))
 r14 := test "a named key is not printable" (-> assert-eq false (printable? up))
 
+;; Non-key events carry no "ch" or "mods" fields at all. Irij's `&&`
+;; evaluates both sides, so a guard written as a chain didn't stop the
+;; field access — `printable?` crashed on the first idle tick after a
+;; text field opened, taking the whole app with it.
+r14b := test "an idle tick is not printable" (-> assert-eq false (printable? idle))
+r14c := test "a resize is not printable" (-> assert-eq false (printable? resize))
+r14d := test "an eof is not printable" (-> assert-eq false (printable? {kind= "eof"}))
+
 ;; ── Keymaps ─────────────────────────────────────────────────────────
 
 km := keymap #[#["ctrl+c" :quit] #["up" :prev] #["down" :next]]
@@ -85,4 +93,4 @@ r31 := test "focus-on ignores an unknown id" (-> assert-eq :list (focused (focus
 r32 := test "an empty ring focuses nothing" (-> assert-eq () (focused (focus #[])))
 r33 := test "next on an empty ring is a no-op" (-> assert-eq () (focused (focus-next (focus #[]))))
 
-summarize #[r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15 r16 r17 r18 r19 r20 r21 r22 r23 r24 r25 r26 r27 r28 r29 r30 r31 r32 r33]
+summarize #[r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r14b r14c r14d r15 r16 r17 r18 r19 r20 r21 r22 r23 r24 r25 r26 r27 r28 r29 r30 r31 r32 r33]

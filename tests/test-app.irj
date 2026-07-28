@@ -228,6 +228,125 @@ fn run-error
 
 r11 := test "the error is re-raised after restoring" (-> assert-throws (-> run-error ()))
 
+;; ── Idle ticks ──────────────────────────────────────────────────────
+;; `term-read` returns {kind= "none"} whenever it times out, which in a
+;; live app is most of the time. An update that assumed every event
+;; carried key fields crashed on the first tick — this drives one
+;; through the loop so that can't ship again.
+
+handler idle-term :: Term
+  sent :! false
+  term-enter opts => resume ()
+  term-leave () => resume ()
+  term-size () => resume {cols= 10 rows= 2}
+  term-read ms =>
+    if sent
+      resume {kind= "key" key= "q" ch= "q" mods= #[]}
+    else
+      sent <- true
+      resume {kind= "none"}
+  term-post ev => resume ()
+  term-write s => resume ()
+  term-flush () => resume ()
+  term-str-width s => resume (length s)
+
+;; An update that pokes at the fields a key event would have.
+fn typing-update
+  => model ev
+  if (key? ev "q")
+    {...model quit= true}
+  else
+    count-if-printable model ev
+
+fn count-if-printable
+  => model ev
+  if (printable? ev)
+    {...model steps= (model.steps + 1)}
+  else
+    model
+
+fn run-idle
+  =>
+  with idle-term
+    run-app (app (fresh-model ()) typing-update tick-view tick-done) {}
+
+idled := run-idle ()
+
+r14 := test "an idle tick passes through update unharmed" (-> assert-true (get "quit" idled))
+r15 := test "an idle tick is not mistaken for input" (-> assert-eq 0 (get "steps" idled))
+
+;; ── Autowrap ────────────────────────────────────────────────────────
+;; A frame is exactly `cols` cells per row, so every full-width row
+;; writes the bottom-right cell — which scrolls the screen when
+;; autowrap is on, taking the top line with it and leaving the border a
+;; column short. The handler hands its capture back through an event,
+;; since handler state can't be read from outside.
+
+handler capture-term :: Term
+  trace :! {wrote= "" done= false}
+  term-enter opts => resume ()
+  term-leave () => resume ()
+  term-size () => resume {cols= 8 rows= 2}
+  term-read ms =>
+    if (get "done" trace)
+      resume {kind= "key" key= "q" ch= "q" mods= #[]}
+    else
+      trace <- {...trace done= true}
+      resume {kind= "app" wrote= (get "wrote" trace)}
+  term-post ev => resume ()
+  term-write s =>
+    trace <- {...trace wrote= ((get "wrote" trace) ++ s)}
+    resume ()
+  term-flush () => resume ()
+  term-str-width s => resume (length s)
+
+fn capture-update
+  => model ev
+  if ((get "kind" ev) == "app")
+    {...model note= (get "wrote" ev)}
+  else
+    tick-update model ev
+
+fn run-capture
+  =>
+  with capture-term
+    run-app (app {sel= 0 steps= 0 quit= false cols= 0 note= ""} capture-update tick-view tick-done) {}
+
+captured := run-capture ()
+
+r16 := test "autowrap is disabled before drawing" (-> assert-true (index-of (get "note" captured) "?7l" >= 0))
+
+;; ── Longevity ───────────────────────────────────────────────────────
+;; The loop must be one self-recursive fn. Split across a chain of
+;; helpers it still passes every test above — and then dies of
+;; StackOverflow after a couple of thousand events, which is minutes of
+;; real use. 20 000 is far past where the broken shape gave out (~2000).
+
+handler firehose :: Term
+  term-enter opts => resume ()
+  term-leave () => resume ()
+  term-size () => resume {cols= 10 rows= 2}
+  term-read ms => resume {kind= "key" key= "x" ch= "x" mods= #[]}
+  term-post ev => resume ()
+  term-write s => resume ()
+  term-flush () => resume ()
+  term-str-width s => resume (length s)
+
+fn counting-update
+  => model ev
+  {...model steps= (model.steps + 1)}
+
+fn twenty-thousand
+  => model
+  model.steps >= 20000
+
+fn run-long
+  =>
+  with firehose
+    run-app (app (fresh-model ()) counting-update tick-view twenty-thousand) {}
+
+r16b := test "the loop survives a long session" (-> assert-eq 20000 (get "steps" (run-long ())))
+
 ;; ── render-once ─────────────────────────────────────────────────────
 ;; A view drawn with no loop and no terminal at all.
 
@@ -235,7 +354,7 @@ fn one-shot
   =>
   render-once (make-app ()) {sel= 1 steps= 0 quit= false cols= 0} {cols= 10 rows= 2}
 
-r12 := test "render-once produces bytes" (-> assert-true (length (one-shot ()) > 0))
-r13 := test "render-once draws the model" (-> assert-true (index-of (one-shot ()) "beta" >= 0))
+r17 := test "render-once produces bytes" (-> assert-true (length (one-shot ()) > 0))
+r18 := test "render-once draws the model" (-> assert-true (index-of (one-shot ()) "beta" >= 0))
 
-summarize #[r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13]
+summarize #[r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r14 r15 r16 r16b r17 r18]

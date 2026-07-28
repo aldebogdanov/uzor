@@ -1,6 +1,6 @@
 mod uzor.app
 
-use std.term {Term term-enter term-leave term-size term-read term-write term-flush}
+use std.term {Term term-enter term-leave term-size term-read term-write term-flush csi}
 use uzor.core {Buffer buffer buf-render buf-diff}
 use uzor.event {resize-event? eof-event?}
 
@@ -41,6 +41,13 @@ pub fn app :: _ Fn Fn Fn App
   App init update view done?
 
 ;; ── Running ─────────────────────────────────────────────────────────
+;;
+;; Autowrap (DECAWM) is turned off for the duration. A frame is exactly
+;; `cols` cells per row, so every full-width row writes the last column
+;; — and with autowrap on, the bottom-right cell scrolls the screen,
+;; taking the top line with it and leaving the right-hand border a
+;; column short. Off, the last cell is just a cell. Restored on the way
+;; out, since a shell with autowrap disabled is unusable.
 
 ;; Run until `done?` says otherwise; returns the final model.
 ;;
@@ -51,7 +58,11 @@ pub fn app :: _ Fn Fn Fn App
 pub fn run-app :: App Map _ ::: Term
   => a opts
   term-enter opts
+  term-write (csi "?7l")
+  term-flush ()
   result := try (-> run-guarded a)
+  term-write (csi "?7h")
+  term-flush ()
   term-leave ()
   match result
     Ok model => model
@@ -60,75 +71,65 @@ pub fn run-app :: App Map _ ::: Term
 fn run-guarded :: App _ ::: Term
   => a
   size := term-size ()
-  first := render-frame a a.init size (blank-of size)
-  loop-app a a.init (nth 0 first) size
+  if (a.done? a.init)
+    a.init
+  else
+    loop-app a a.init (draw-frame a a.init size (blank-of size) true) size
 
-;; One frame: draw the model, send only what changed, hand back the
-;; buffer so the next frame has something to diff against.
+;; The loop, as ONE self-recursive function.
 ;;
-;; Returns #(buffer) rather than the buffer so the shape stays the same
-;; if a later phase needs to report more (a cursor position, say).
-fn render-frame :: App _ Map Buffer Tuple ::: Term
-  => a model size prev
+;; That shape is load-bearing, not style. A direct tail self-call is
+;; compiled to a jump even across an effect perform, but a chain —
+;; loop → step → dispatch → advance → loop — is not: the state
+;; machine's continuation stack then grows by a frame per event, and
+;; the app dies of StackOverflow after a couple of thousand
+;; keystrokes. That is minutes of use, and it shipped looking fine in
+;; every test that pressed a handful of keys.
+;;
+;; Effectful *helpers* are fine — only the recursion has to be direct.
+fn loop-app :: App _ Buffer Map _ ::: Term
+  => a model prev size
+  ev := term-read 50
+  size2 := size-after ev size
+  model2 := next-model a model ev
+  if ((eof-event? ev) || (a.done? model2))
+    model2
+  else
+    loop-app a model2 (draw-frame a model2 size2 prev (resize-event? ev)) size2
+
+;; stdin closing is not a quit key, and there is no confirmation prompt
+;; that is going to be answered — the model is handed back untouched.
+fn next-model :: App _ Map _
+  => a model ev
+  if (eof-event? ev)
+    model
+  else
+    a.update model ev
+
+fn size-after :: Map Map Map
+  => ev size
+  if (resize-event? ev)
+    {cols= (get "cols" ev) rows= (get "rows" ev)}
+  else
+    size
+
+;; One frame. `full?` forces a repaint from nothing: for the first
+;; frame there is nothing on screen yet, and after a resize everything
+;; below the first reflowed line has moved, so there is no previous
+;; frame worth diffing against.
+fn draw-frame :: App _ Map Buffer Bool Buffer ::: Term
+  => a model size prev full?
   buf := a.view model size
-  term-write (buf-diff prev buf)
+  if full?
+    term-write (buf-render buf)
+  else
+    term-write (buf-diff prev buf)
   term-flush ()
-  #(buf)
+  buf
 
 fn blank-of :: Map Buffer
   => size
   buffer (get "cols" size) (get "rows" size)
-
-;; A repaint from nothing — the first frame, and after a resize. Both
-;; cases have no valid previous frame to diff against: before the first
-;; there is nothing on screen, and after a resize everything below the
-;; first reflowed line has moved.
-fn repaint :: App _ Map Buffer ::: Term
-  => a model size
-  buf := a.view model size
-  term-write (buf-render buf)
-  term-flush ()
-  buf
-
-;; The loop. Tail-recursive, so it runs indefinitely in constant stack.
-fn loop-app :: App _ Buffer Map _ ::: Term
-  => a model prev size
-  if (a.done? model)
-    model
-  else
-    step-app a model prev size
-
-fn step-app :: App _ Buffer Map _ ::: Term
-  => a model prev size
-  ev := term-read 50
-  if (eof-event? ev)
-    model
-  else
-    dispatch-app a model prev size ev
-
-fn dispatch-app :: App _ Buffer Map Map _ ::: Term
-  => a model prev size ev
-  if (resize-event? ev)
-    resize-app a model ev
-  else
-    advance-app a model prev size ev
-
-;; The event still goes to `update` after a resize — an app may want to
-;; know — but the frame is repainted rather than diffed, and every
-;; frame after it is measured against the new size.
-fn resize-app :: App _ Map _ ::: Term
-  => a model ev
-  size2 := {cols= (get "cols" ev) rows= (get "rows" ev)}
-  model2 := a.update model ev
-  loop-app a model2 (repaint a model2 size2) size2
-
-fn advance-app :: App _ Buffer Map Map _ ::: Term
-  => a model prev size ev
-  model2 := a.update model ev
-  if (a.done? model2)
-    model2
-  else
-    loop-app a model2 (nth 0 (render-frame a model2 size prev)) size
 
 ;; ── Running one frame ───────────────────────────────────────────────
 

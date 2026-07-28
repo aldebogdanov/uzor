@@ -67,9 +67,25 @@ pub fn eof-event? :: Map Bool
 
 ;; A character the app could insert into a text field: a printable key
 ;; with no modifier beyond shift (which is already in the character).
+;;
+;; Written as nested ifs rather than a chain of `&&`, because Irij's
+;; `&&` evaluates both sides: an idle or resize event carries no "mods"
+;; field, and the guard that was supposed to stop us looking would not
+;; have run first. A one-line predicate crashed the whole app on the
+;; first timeout tick after entering a text field.
 pub fn printable? :: Map Bool
   => ev
-  (key-event? ev) && ((get "ch" ev) /= "") && (empty? (get "mods" ev))
+  if ((key-event? ev) == false)
+    false
+  else
+    printable-char-of ev
+
+fn printable-char-of :: Map Bool
+  => ev
+  if ((get "ch" ev) == "")
+    false
+  else
+    empty? (get "mods" ev)
 
 ;; ── Keymaps ─────────────────────────────────────────────────────────
 
