@@ -1,0 +1,354 @@
+use std.test :open
+use std.term {Term term-enter term-leave term-size term-read term-write term-flush term-post term-str-width}
+use butterfly.core {Reactive reactive signal compute deref peek reset swap sig-version}
+use uzor.core :open
+use uzor.style :open
+use uzor.widgets :open
+use uzor.event :open
+use uzor.reactive :open
+
+;; The reactive loop, driven with no terminal — same trick as
+;; tests/test-app.irj. Signals are created *before* `run-reactive` and
+;; closed over by the setup lambda, so the test still holds the handles
+;; afterwards and can read the final state straight out of the graph.
+;;
+;; Handler state is a static singleton in Irij, so a scripted mock
+;; plays its script once per program: one handler per scenario.
+
+items := #["alpha" "beta" "gamma"]
+
+;; ── Shared app pieces ───────────────────────────────────────────────
+
+fn view-for ::: Reactive
+  => sel size-sig
+  compute (-> draw-list (buffer (deref size-sig).cols (deref size-sig).rows)
+                        (rect 0 0 (deref size-sig).cols (deref size-sig).rows)
+                        (list-view items (deref sel) 0) plain (style {reverse= true}))
+
+fn handle ::: Reactive
+  => sel quit seen ev
+  if (key? ev "q")
+    reset quit true
+  else
+    handle-nav sel seen ev
+
+fn handle-nav ::: Reactive
+  => sel seen ev
+  if (key? ev "down")
+    swap sel (n -> min (n + 1) 2)
+  else
+    note-other seen ev
+
+fn note-other ::: Reactive
+  => seen ev
+  if (resize-event? ev)
+    reset seen (get "cols" ev)
+  else
+    ()
+
+;; setup receives the loop's size signal; the view is stashed in a
+;; holder so the test can inspect its recompute count afterwards.
+fn make-setup ::: Reactive
+  => sel quit seen holder
+  (size-sig -> reactive-app (stash holder (view-for sel size-sig)) (ev -> handle sel quit seen ev) (-> deref quit))
+
+fn stash ::: Reactive
+  => holder v
+  reset holder v
+  v
+
+;; ── Scripted keys ───────────────────────────────────────────────────
+
+handler keys-term :: Term
+  script :! #["down" "down" "q"]
+  term-enter opts => resume ()
+  term-leave () => resume ()
+  term-size () => resume {cols= 16 rows= 4}
+  term-read ms =>
+    if (empty? script)
+      resume {kind= "eof"}
+    else
+      k := head script
+      script <- tail script
+      resume {kind= "key" key= k ch= "" mods= #[]}
+  term-post ev => resume ()
+  term-write s => resume ()
+  term-flush () => resume ()
+  term-str-width s => resume (length s)
+
+fn run-keys ::: Term Reactive
+  =>
+  sel := signal 0
+  quit := signal false
+  seen := signal 0
+  holder := signal ()
+  snap := run-reactive (make-setup sel quit seen holder) {}
+  #((deref sel) (sig-version (deref holder)))
+
+fn keys-scenario
+  =>
+  with keys-term
+    with reactive
+      run-keys ()
+
+keyed := keys-scenario ()
+
+r1 := test "events reach dispatch and write signals" (-> assert-eq 2 (nth 0 keyed))
+
+;; The view is a compute over the signals it reads, so it re-ran for
+;; each of the two moves and not for the quit key, which the view
+;; doesn't look at. (Version starts at 1 from the first frame.)
+r2 := test "the view recomputes only when its inputs move" (-> assert-eq 3 (nth 1 keyed))
+
+;; ── Nothing to redraw ───────────────────────────────────────────────
+;; An event that touches no signal the view reads costs no recompute
+;; and no bytes. This is the whole point of routing the frame through
+;; a compute.
+
+handler idle-keys :: Term
+  script :! #["x" "x" "q"]
+  term-enter opts => resume ()
+  term-leave () => resume ()
+  term-size () => resume {cols= 16 rows= 4}
+  term-read ms =>
+    if (empty? script)
+      resume {kind= "eof"}
+    else
+      k := head script
+      script <- tail script
+      resume {kind= "key" key= k ch= "" mods= #[]}
+  term-post ev => resume ()
+  term-write s => resume ()
+  term-flush () => resume ()
+  term-str-width s => resume (length s)
+
+fn run-idle ::: Term Reactive
+  =>
+  sel := signal 0
+  quit := signal false
+  seen := signal 0
+  holder := signal ()
+  snap := run-reactive (make-setup sel quit seen holder) {}
+  sig-version (deref holder)
+
+fn idle-scenario
+  =>
+  with idle-keys
+    with reactive
+      run-idle ()
+
+r3 := test "an event touching nothing recomputes nothing" (-> assert-eq 1 (idle-scenario ()))
+
+;; ── Undo and redo ───────────────────────────────────────────────────
+;; `restore` rewinds the whole graph, which is why the history lives in
+;; the loop's recursion rather than in a signal: a history kept inside
+;; the graph would be rewound with it and the second step back would
+;; have nowhere to go.
+
+handler undo-keys :: Term
+  script :! #["down" "down" "u" "u" "q"]
+  term-enter opts => resume ()
+  term-leave () => resume ()
+  term-size () => resume {cols= 16 rows= 4}
+  term-read ms =>
+    if (empty? script)
+      resume {kind= "eof"}
+    else
+      k := head script
+      script <- tail script
+      resume {kind= "key" key= k ch= "" mods= #[]}
+  term-post ev => resume ()
+  term-write s => resume ()
+  term-flush () => resume ()
+  term-str-width s => resume (length s)
+
+fn undo-handle ::: Reactive
+  => sel quit ev
+  if (key? ev "u")
+    :undo
+  else
+    if (key? ev "r")
+      :redo
+    else
+      undo-move sel quit ev
+
+fn undo-move ::: Reactive
+  => sel quit ev
+  if (key? ev "q")
+    reset quit true
+  else
+    bump-if-down sel ev
+
+fn bump-if-down ::: Reactive
+  => sel ev
+  if (key? ev "down")
+    swap sel (n -> n + 1)
+  else
+    ()
+
+fn undo-setup ::: Reactive
+  => sel quit holder
+  (size-sig -> reactive-app (stash holder (view-for sel size-sig)) (ev -> undo-handle sel quit ev) (-> deref quit))
+
+fn run-undo ::: Term Reactive
+  =>
+  sel := signal 0
+  quit := signal false
+  holder := signal ()
+  snap := run-reactive (undo-setup sel quit holder) {}
+  deref sel
+
+fn undo-scenario
+  =>
+  with undo-keys
+    with reactive
+      run-undo ()
+
+;; Two moves forward, two steps back.
+r4 := test "undo rewinds the graph" (-> assert-eq 0 (undo-scenario ()))
+
+handler redo-keys :: Term
+  script :! #["down" "down" "u" "u" "r" "q"]
+  term-enter opts => resume ()
+  term-leave () => resume ()
+  term-size () => resume {cols= 16 rows= 4}
+  term-read ms =>
+    if (empty? script)
+      resume {kind= "eof"}
+    else
+      k := head script
+      script <- tail script
+      resume {kind= "key" key= k ch= "" mods= #[]}
+  term-post ev => resume ()
+  term-write s => resume ()
+  term-flush () => resume ()
+  term-str-width s => resume (length s)
+
+fn run-redo ::: Term Reactive
+  =>
+  sel := signal 0
+  quit := signal false
+  holder := signal ()
+  snap := run-reactive (undo-setup sel quit holder) {}
+  deref sel
+
+fn redo-scenario
+  =>
+  with redo-keys
+    with reactive
+      run-redo ()
+
+r5 := test "redo replays a step" (-> assert-eq 1 (redo-scenario ()))
+
+;; Undoing past the start is a no-op, not an error — a user leaning on
+;; the key shouldn't crash the app.
+handler over-undo :: Term
+  script :! #["u" "u" "u" "q"]
+  term-enter opts => resume ()
+  term-leave () => resume ()
+  term-size () => resume {cols= 16 rows= 4}
+  term-read ms =>
+    if (empty? script)
+      resume {kind= "eof"}
+    else
+      k := head script
+      script <- tail script
+      resume {kind= "key" key= k ch= "" mods= #[]}
+  term-post ev => resume ()
+  term-write s => resume ()
+  term-flush () => resume ()
+  term-str-width s => resume (length s)
+
+fn run-over-undo ::: Term Reactive
+  =>
+  sel := signal 0
+  quit := signal false
+  holder := signal ()
+  snap := run-reactive (undo-setup sel quit holder) {}
+  deref sel
+
+fn over-undo-scenario
+  =>
+  with over-undo
+    with reactive
+      run-over-undo ()
+
+r6 := test "undo past the start is a no-op" (-> assert-eq 0 (over-undo-scenario ()))
+
+;; ── Resize ──────────────────────────────────────────────────────────
+;; The loop writes the size signal, so every compute reading it
+;; recomputes — the view included. The event still reaches dispatch.
+
+handler resize-keys :: Term
+  sent :! false
+  term-enter opts => resume ()
+  term-leave () => resume ()
+  term-size () => resume {cols= 16 rows= 4}
+  term-read ms =>
+    if sent
+      resume {kind= "key" key= "q" ch= "" mods= #[]}
+    else
+      sent <- true
+      resume {kind= "resize" cols= 60 rows= 20}
+  term-post ev => resume ()
+  term-write s => resume ()
+  term-flush () => resume ()
+  term-str-width s => resume (length s)
+
+fn run-resize ::: Term Reactive
+  =>
+  sel := signal 0
+  quit := signal false
+  seen := signal 0
+  holder := signal ()
+  snap := run-reactive (make-setup sel quit seen holder) {}
+  #((deref seen) (sig-version (deref holder)))
+
+fn resize-scenario
+  =>
+  with resize-keys
+    with reactive
+      run-resize ()
+
+resized := resize-scenario ()
+
+r7 := test "a resize reaches dispatch" (-> assert-eq 60 (nth 0 resized))
+r8 := test "a resize recomputes the view" (-> assert-eq 2 (nth 1 resized))
+
+;; ── Longevity ───────────────────────────────────────────────────────
+;; The same rule as uzor.app: the loop is one self-recursive fn, or the
+;; continuation stack grows by a frame per event.
+
+handler firehose :: Term
+  term-enter opts => resume ()
+  term-leave () => resume ()
+  term-size () => resume {cols= 8 rows= 2}
+  term-read ms => resume {kind= "key" key= "down" ch= "" mods= #[]}
+  term-post ev => resume ()
+  term-write s => resume ()
+  term-flush () => resume ()
+  term-str-width s => resume (length s)
+
+fn many-handle ::: Reactive
+  => n ev
+  swap n (i -> i + 1)
+
+fn many-setup ::: Reactive
+  => n size-sig-unused
+  (size-sig -> reactive-app (compute (-> buffer (deref size-sig).cols (deref size-sig).rows)) (ev -> many-handle n ev) (-> (deref n) >= 20000))
+
+fn run-many ::: Term Reactive
+  =>
+  n := signal 0
+  snap := run-reactive (many-setup n 0) {}
+  deref n
+
+fn many-scenario
+  =>
+  with firehose
+    with reactive
+      run-many ()
+
+r9 := test "the loop survives a long session" (-> assert-eq 20000 (many-scenario ()))
+
+summarize #[r1 r2 r3 r4 r5 r6 r7 r8 r9]
