@@ -3,6 +3,7 @@ mod uzor.widgets
 use uzor.core {Rect Buffer Style rect rect-bottom rect-right rect-empty? rect-contains? buf-text buf-fill buf-put span}
 use uzor.style {plain cell-width}
 use uzor.text {Align Left Center Right fit truncate ellipsize wrap}
+use uzor.event {key? mouse-press? mouse-pos}
 use uzor.layout {split-h}
 
 ;; The widget set.
@@ -227,6 +228,184 @@ fn draw-one-cell :: Buffer Rect Str Style Buffer
     buf
   else
     buf-text buf cr.y cr.x st (fit (ellipsize text cr.w) cr.w (Left))
+
+;; ── Buttons ─────────────────────────────────────────────────────────
+;;
+;; A row of choices with one of them focused. Like every other widget
+;; this holds no state: the app owns the row, moves the focus and reads
+;; the answer back.
+;;
+;; Laid out right-aligned, which is where a dialog's buttons live —
+;; and, more usefully, means the rightmost button keeps its position
+;; when a label changes length.
+
+pub spec ButtonRow
+  labels :: Vec
+  focused :: Int
+
+pub fn buttons :: Vec ButtonRow
+  => labels
+  ButtonRow labels 0
+
+pub fn button-focus :: ButtonRow Int ButtonRow
+  => row i
+  ButtonRow row.labels (clamp-index i (length row.labels))
+
+;; Wraps, like the focus ring: stopping dead at the last button reads
+;; as a broken key.
+pub fn button-next :: ButtonRow ButtonRow
+  => row
+  if (empty? row.labels)
+    row
+  else
+    ButtonRow row.labels (rem (row.focused + 1) (length row.labels))
+
+pub fn button-prev :: ButtonRow ButtonRow
+  => row
+  if (empty? row.labels)
+    row
+  else
+    ButtonRow row.labels (rem ((row.focused + (length row.labels)) - 1) (length row.labels))
+
+;; The focused label, or `()` for an empty row.
+pub fn button-label :: ButtonRow _
+  => row
+  if (empty? row.labels)
+    ()
+  else
+    nth row.focused row.labels
+
+;; `[ Label ]` — the brackets are what make a button look pressable in
+;; a terminal, where there is no other affordance.
+fn button-text :: Str Str
+  => label
+  "[ " ++ label ++ " ]"
+
+fn button-width :: Str Int
+  => label
+  (cell-width label) + 4
+
+;; Where each button sits. Drawing and hit testing share this, so a
+;; click can never land somewhere the drawing didn't put a button.
+pub fn button-rects :: Rect ButtonRow Vec
+  => r row
+  total := fold (a l -> a + (button-width l) + 1) (-1) row.labels
+  place-buttons r row.labels ((r.x + r.w) - (max 0 total)) #[]
+
+fn place-buttons :: Rect Vec Int Vec Vec
+  => r labels x acc
+  if (empty? labels)
+    acc
+  else
+    place-next r labels x acc
+
+fn place-next :: Rect Vec Int Vec Vec
+  => r labels x acc
+  w := button-width (head labels)
+  place-buttons r (tail labels) (x + w + 1) (conj acc (rect x r.y w 1))
+
+pub fn draw-buttons :: Buffer Rect ButtonRow Style Style Buffer
+  => buf r row st focus-st
+  if (rect-empty? r)
+    buf
+  else
+    draw-button-at buf (button-rects r row) row st focus-st 0
+
+fn draw-button-at :: Buffer Vec ButtonRow Style Style Int Buffer
+  => buf rects row st focus-st i
+  if (i >= (length rects))
+    buf
+  else
+    draw-button-at (draw-one-button buf (nth i rects) (nth i row.labels) (i == row.focused) st focus-st) rects row st focus-st (i + 1)
+
+fn draw-one-button :: Buffer Rect Str Bool Style Style Buffer
+  => buf br label focused? st focus-st
+  buf-text buf br.y br.x (if focused? focus-st else st) (button-text label)
+
+;; Which button a click landed on, or `()`. Same rects the drawing
+;; used.
+pub fn button-hit :: Rect ButtonRow Int Int _
+  => r row col mouse-row
+  if (mouse-row /= r.y)
+    ()
+  else
+    hit-button (button-rects r row) col 0
+
+fn hit-button :: Vec Int Int _
+  => rects col i
+  if (i >= (length rects))
+    ()
+  else
+    hit-or-next rects col i
+
+fn hit-or-next :: Vec Int Int _
+  => rects col i
+  br := nth i rects
+  if ((col >= br.x) && (col < (br.x + br.w)))
+    i
+  else
+    hit-button rects col (i + 1)
+
+;; ── Answering a button row ──────────────────────────────────────────
+;;
+;; `button-event` returns #(row outcome):
+;;
+;;   ()          nothing happened — the row may still have moved
+;;   :cancel     escape
+;;   <label>     that button was chosen
+;;
+;; The label rather than an index, because an index is a position and
+;; positions get reordered. An app matching on "Delete" keeps working
+;; when someone puts Cancel first.
+;;
+;; Enter and space both activate, and left/right/tab/shift+tab all
+;; move: a dialog is the last place to be strict about which key a
+;; person reaches for.
+pub fn button-event :: ButtonRow Map Tuple
+  => row ev
+  if (key? ev "escape")
+    #(row :cancel)
+  else
+    button-activate row ev
+
+fn button-activate :: ButtonRow Map Tuple
+  => row ev
+  if ((key? ev "enter") || (key? ev "space"))
+    #(row (button-label row))
+  else
+    button-move row ev
+
+fn button-move :: ButtonRow Map Tuple
+  => row ev
+  if ((key? ev "right") || (key? ev "tab") || (key? ev "l"))
+    #((button-next row) ())
+  else
+    button-move-back row ev
+
+fn button-move-back :: ButtonRow Map Tuple
+  => row ev
+  if ((key? ev "left") || (key? ev "backtab") || (key? ev "h"))
+    #((button-prev row) ())
+  else
+    #(row ())
+
+;; A click both focuses and activates, which is what a mouse user
+;; expects — nobody clicks a button to select it and then presses
+;; enter.
+pub fn button-click :: ButtonRow Rect Map Tuple
+  => row r ev
+  if (not (mouse-press? ev "left"))
+    #(row ())
+  else
+    button-click-at row r (mouse-pos ev)
+
+fn button-click-at :: ButtonRow Rect Tuple Tuple
+  => row r pos
+  hit := button-hit r row (nth 0 pos) (nth 1 pos)
+  if (hit == ())
+    #(row ())
+  else
+    #((button-focus row hit) (nth hit row.labels))
 
 ;; ── Input ───────────────────────────────────────────────────────────
 

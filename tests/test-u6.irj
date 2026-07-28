@@ -122,6 +122,62 @@ r38 := test "an oversized modal is clamped to the screen" (-> assert-eq 30 (over
 r39 := test "a modal is centred" (-> assert-eq (rect 10 2 10 5) (overlay-rect (rect 0 0 30 9) 10 5))
 r40 := test "an empty screen draws no modal" (-> assert-eq (buffer 4 2) (draw-modal (buffer 4 2) (rect 0 0 0 0) (dark-theme ()) "t" "b" 10 5))
 
+
+;; ── Buttons ─────────────────────────────────────────────────────────
+;; A dialog you can only dismiss isn't much of a dialog. The app owns
+;; the row, moves the focus, and reads back which label was chosen.
+
+pair := buttons #["Cancel" "Delete"]
+
+r43b := test "the first button starts focused" (-> assert-eq "Cancel" (button-label pair))
+r43c := test "next moves along" (-> assert-eq "Delete" (button-label (button-next pair)))
+;; Wraps, like the focus ring: stopping dead reads as a broken key.
+r43d := test "next wraps" (-> assert-eq "Cancel" (button-label (button-next (button-next pair))))
+r43e := test "prev wraps backwards" (-> assert-eq "Delete" (button-label (button-prev pair)))
+r43f := test "an empty row focuses nothing" (-> assert-eq () (button-label (buttons #[])))
+
+;; The chosen *label*, not an index — an index is a position, and
+;; positions get reordered. Matching on "Delete" survives someone
+;; putting Cancel first.
+r43g := test "enter chooses the focused label" (-> assert-eq "Cancel" (nth 1 (button-event pair {kind= "key" key= "enter" ch= "" mods= #[]})))
+r43h := test "space chooses too" (-> assert-eq "Cancel" (nth 1 (button-event pair {kind= "key" key= "space" ch= " " mods= #[]})))
+r43i := test "escape cancels" (-> assert-eq :cancel (nth 1 (button-event pair {kind= "key" key= "escape" ch= "" mods= #[]})))
+r43j := test "right moves without choosing" (-> assert-eq () (nth 1 (button-event pair {kind= "key" key= "right" ch= "" mods= #[]})))
+r43k := test "right moves the focus" (-> assert-eq "Delete" (button-label (nth 0 (button-event pair {kind= "key" key= "right" ch= "" mods= #[]}))))
+r43l := test "tab moves too" (-> assert-eq "Delete" (button-label (nth 0 (button-event pair {kind= "key" key= "tab" ch= "" mods= #[]}))))
+r43m := test "an unrelated key does nothing" (-> assert-eq () (nth 1 (button-event pair {kind= "key" key= "z" ch= "z" mods= #[]})))
+;; Idle ticks reach a dialog like anything else.
+r43n := test "an idle tick does nothing" (-> assert-eq () (nth 1 (button-event pair idle)))
+
+;; Layout: drawing and hit testing share the same rects, so a click
+;; can't land where no button was drawn.
+brow := rect 0 0 30 1
+
+r43o := test "buttons are right-aligned" (-> assert-eq "         [ Cancel ] [ Delete ]" (row-text (draw-buttons (buffer 30 1) brow pair plain (style {reverse= true})) 0))
+r43p := test "the focused button is highlighted" (-> assert-true (nth 1 (buf-line (draw-buttons (buffer 30 1) brow pair plain (style {reverse= true})) 0)).st.reverse)
+r43q := test "a click lands on the button under it" (-> assert-eq 1 (button-hit brow pair 25 0))
+r43r := test "a click between buttons hits nothing" (-> assert-eq () (button-hit brow pair 19 0))
+r43s := test "a click on another row hits nothing" (-> assert-eq () (button-hit brow pair 25 5))
+
+;; A click focuses *and* activates — nobody clicks a button to select
+;; it and then presses enter.
+fn clicked
+  =>
+  button-click pair brow {kind= "mouse" btn= "left" press= true col= 25 row= 0 mods= #[]}
+
+r43t := test "a click chooses that button" (-> assert-eq "Delete" (nth 1 (clicked ())))
+r43u := test "a click moves the focus there" (-> assert-eq "Delete" (button-label (nth 0 (clicked ()))))
+r43v := test "a click that misses chooses nothing" (-> assert-eq () (nth 1 (button-click pair brow {kind= "mouse" btn= "left" press= true col= 1 row= 0 mods= #[]})))
+r43w := test "a release is not a click" (-> assert-eq () (nth 1 (button-click pair brow {kind= "mouse" btn= "left" press= false col= 25 row= 0 mods= #[]})))
+
+fn confirm-dialog
+  =>
+  draw-buttons-dialog (under ()) (rect 0 0 30 9) (dark-theme ()) " confirm " "Delete this?" (button-next pair) 26 8
+
+r43x := test "a button dialog draws its buttons inside the frame" (-> assert-true (index-of (row-text (confirm-dialog ()) 6) "[ Delete ]" >= 0))
+r43y := test "a button dialog keeps a blank row above them" (-> assert-eq "..│                        │.." (row-text (confirm-dialog ()) 5))
+r43z := test "a button dialog still dims the screen" (-> assert-eq 8 (nth 0 (buf-line (confirm-dialog ()) 0)).st.fg)
+
 ;; ── Toasts ──────────────────────────────────────────────────────────
 ;; No frame: a toast that borrowed a modal's box would read as
 ;; something the user has to dismiss.
@@ -134,4 +190,4 @@ r41 := test "a toast pins to the bottom row" (-> assert-eq "   saved    " (row-t
 r42 := test "a toast leaves the rows above alone" (-> assert-true (empty? (buf-line (toasted ()) 1)))
 r43 := test "a toast fills the width" (-> assert-eq 12 (line-width (buf-line (toasted ()) 2)))
 
-summarize #[r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15 r16 r17 r18 r19 r20 r21 r22 r23 r24 r25 r26 r27 r28 r29 r30 r31 r32 r33 r34 r35 r36 r37 r38 r39 r40 r41 r42 r43]
+summarize #[r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15 r16 r17 r18 r19 r20 r21 r22 r23 r24 r25 r26 r27 r28 r29 r30 r31 r32 r33 r34 r35 r36 r37 r38 r39 r40 r41 r42 r43 r43b r43c r43d r43e r43f r43g r43h r43i r43j r43k r43l r43m r43n r43o r43p r43q r43r r43s r43t r43u r43v r43w r43x r43y r43z]

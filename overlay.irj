@@ -6,6 +6,7 @@ use uzor.text {Align Left Center wrap fit}
 use uzor.layout {center inner}
 use uzor.box {BoxChars draw-panel draw-titled-box}
 use uzor.theme {Theme}
+use uzor.widgets {ButtonRow draw-buttons button-rects}
 
 ;; Things drawn on top of a finished frame.
 ;;
@@ -81,6 +82,41 @@ fn draw-body :: Buffer Rect Theme Vec Int Buffer
 pub fn draw-dialog :: Buffer Rect Theme Str Str Int Int Buffer
   => buf screen t title body max-w max-h
   draw-modal (dim buf screen t.muted) screen t title body max-w max-h
+
+
+;; ── Dialogs with buttons ────────────────────────────────────────────
+;;
+;; A modal the user answers rather than merely dismisses. The buttons
+;; sit on the bottom row inside the frame, right-aligned, and the
+;; height reserves a row for them plus a blank one above — a button
+;; pressed against the body text reads as part of the sentence.
+;;
+;; The app owns the ButtonRow: it moves the focus with `button-event`,
+;; reads the chosen label back, and decides what that means. Nothing
+;; here knows what "Delete" does.
+
+pub fn draw-buttons-dialog :: Buffer Rect Theme Str Str ButtonRow Int Int Buffer
+  => buf screen t title body row max-w max-h
+  if (rect-empty? screen)
+    buf
+  else
+    place-buttons-dialog (dim buf screen t.muted) screen t title body row max-w max-h
+
+fn place-buttons-dialog :: Buffer Rect Theme Str Str ButtonRow Int Int Buffer
+  => buf screen t title body row max-w max-h
+  w := min max-w screen.w
+  lines := wrap body (max 1 (w - 4))
+  h := min (min max-h screen.h) ((length lines) + 6)
+  r := overlay-rect screen w h
+  framed := draw-titled-box (draw-panel buf r t.chars t.border) r t.chars t.border title
+  bodied := draw-body framed (inner r) t lines 0
+  draw-buttons bodied (buttons-row-rect r) row t.normal t.selected
+
+;; The bottom row inside the frame, inset by one so the buttons don't
+;; touch the border.
+pub fn buttons-row-rect :: Rect Rect
+  => r
+  rect (r.x + 2) ((rect-bottom r) - 2) (max 0 (r.w - 4)) 1
 
 ;; ── Toasts ──────────────────────────────────────────────────────────
 

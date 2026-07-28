@@ -386,7 +386,32 @@ a subsystem.
 | `draw-overlay` | a framed, cleared region |
 | `draw-modal` | titled panel, wrapped body, centred and clamped |
 | `draw-dialog` | `draw-modal` over a dimmed screen |
+| `draw-buttons-dialog` | a dialog the user *answers*, with a button row |
 | `draw-toast` | one-line notice pinned to the bottom, no frame |
+
+### Buttons
+
+A dialog you can only dismiss isn't much of a dialog. `ButtonRow` is a row of
+choices with one focused; the app owns it, moves the focus, and reads back
+which was chosen.
+
+```irij
+answer := buttons #["Cancel" "Delete"]
+…
+outcome := button-event answer ev       ;; #(row result)
+;;   result: ()  nothing · :cancel  escape · "Delete"  that button
+```
+
+The **label** comes back, not an index — an index is a position, and positions
+get reordered. Matching on `"Delete"` survives someone putting Cancel first.
+
+Enter and space both activate, and left/right/tab/shift-tab all move: a dialog
+is the last place to be strict about which key someone reaches for. `button-click`
+handles the mouse, focusing *and* activating in one go — nobody clicks a button
+to select it and then presses enter.
+
+`draw-buttons` and `button-hit` share one layout function, so a click can never
+land where no button was drawn.
 
 Dimming preserves the text so the user can still read the context they're being
 asked about. Everything here clears what it covers — a panel that drew only its
@@ -448,7 +473,7 @@ top-level binding named `st` (irij#11), and don't check product-spec fields
 (irij#12).
 
 ```
-irij test        # 288 tests, no terminal required
+irij test        # 313 tests, no terminal required
 ```
 
 ## Examples
