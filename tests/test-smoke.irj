@@ -3,6 +3,6 @@ use uzor.core :open
 
 r1 := test "uzor loads and reports version" (-> assert-eq "0.1" (uzor-version ()))
 r2 := test "substring order" (-> assert-eq "el" (substring "hello" 1 3))
-r3 := test "buffer has rows" (-> assert-eq 3 (length (get "lines" (buffer 10 3))))
+r3 := test "buffer has rows" (-> assert-eq 3 (length (buffer 10 3).lines))
 
 summarize #[r1 r2 r3]

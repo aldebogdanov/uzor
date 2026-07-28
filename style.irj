@@ -4,8 +4,8 @@ use std.term {csi}
 
 ;; Colours, attributes and display width — everything needed to turn a
 ;; run of text into bytes a terminal understands. No effects here: a
-;; style is a map, `sgr` is a pure Str, and width is computed from code
-;; points. That keeps the whole rendering path testable without a
+;; style is a value, `sgr` is a pure Str, and width is computed from
+;; code points. That keeps the whole rendering path testable without a
 ;; terminal.
 
 ;; ── Colours ─────────────────────────────────────────────────────────
@@ -61,22 +61,32 @@ pub spec Style
   underline :: Bool
   reverse :: Bool
 
+;; `style {fg= red bold= true}` — anything left out comes from the
+;; defaults below, so a caller never spells out all seven fields. This
+;; is also the only place those defaults are written down.
+pub fn style :: Map Style
+  => o
+  Style (field-or o "fg" (-1)) (field-or o "bg" (-1)) (field-or o "bold" false) (field-or o "dim" false) (field-or o "italic" false) (field-or o "underline" false) (field-or o "reverse" false)
+
+fn field-or :: Map Str _ _
+  => m k dflt
+  if (contains? m k)
+    get k m
+  else
+    dflt
+
 ;; The identity style — default colours, no attributes.
-pub plain := {fg= -1 bg= -1 bold= false dim= false italic= false underline= false reverse= false}
+pub plain := style {}
 
-;; `style {fg= red bold= true}` — the rest come from `plain`, so a
-;; caller never has to spell out all seven fields.
-pub fn style :: Map Map
-  => overrides
-  merge plain overrides
-
-pub fn with-fg :: Map Int Map
+;; Field updates go through the constructor: record-update syntax
+;; (`{...st fg= c}`) is Map-only, and a Style is a spec value.
+pub fn with-fg :: Style Int Style
   => st c
-  assoc st "fg" c
+  Style c st.bg st.bold st.dim st.italic st.underline st.reverse
 
-pub fn with-bg :: Map Int Map
+pub fn with-bg :: Style Int Style
   => st c
-  assoc st "bg" c
+  Style st.fg c st.bold st.dim st.italic st.underline st.reverse
 
 ;; ── SGR ─────────────────────────────────────────────────────────────
 
@@ -88,40 +98,35 @@ pub fn with-bg :: Map Int Map
 ;; a differential encoder has to know what the terminal is already
 ;; showing, and any drift (a resize, a stray write, a redrawn region)
 ;; leaves colour smeared across the screen.
-pub fn sgr :: Map Str
+pub fn sgr :: Style Str
   => st
   csi ((join ";" (sgr-params st)) ++ "m")
 
-;; Explicit recursion rather than a fold with a lambda: a lambda here
-;; would have to capture `st`, and captured parameters currently lose
-;; to a same-named top-level binding in the *calling* program (an Irij
-;; scoping bug — a caller with `st := …` silently got the wrong style).
-;; Recursion passes everything by argument, so nothing is captured.
-fn sgr-params :: Map Vec
+fn sgr-params :: Style Vec
   => st
-  add-colors st (collect-attrs st attr-flags #["0"])
+  add-colors st (attr-params st)
 
-fn collect-attrs :: Map Vec Vec Vec
-  => st flags params
-  if (empty? flags)
-    params
+;; Spelled out rather than folded over a table of field names: fields
+;; of a spec value are reached by `.name`, which is static, so a
+;; name-driven loop would need the Map representation back.
+fn attr-params :: Style Vec
+  => st
+  a1 := flag-param #["0"] st.bold "1"
+  a2 := flag-param a1 st.dim "2"
+  a3 := flag-param a2 st.italic "3"
+  a4 := flag-param a3 st.underline "4"
+  flag-param a4 st.reverse "7"
+
+fn flag-param :: Vec Bool Str Vec
+  => params on param
+  if on
+    conj params param
   else
-    collect-attrs st (tail flags) (add-attr st params (head flags))
-
-;; attribute key → SGR parameter
-attr-flags := #[#["bold" "1"] #["dim" "2"] #["italic" "3"] #["underline" "4"] #["reverse" "7"]]
-
-fn add-attr :: Map Vec Vec Vec
-  => st params flag
-  if (get (nth 0 flag) st)
-    conj params (nth 1 flag)
-  else
     params
 
-fn add-colors :: Map Vec Vec
+fn add-colors :: Style Vec Vec
   => st params
-  with-fg-param := add-color params (get "fg" st) "38"
-  add-color with-fg-param (get "bg" st) "48"
+  add-color (add-color params st.fg "38") st.bg "48"
 
 fn add-color :: Vec Int Str Vec
   => params c prefix
@@ -149,22 +154,9 @@ wide-ranges := #[#[4352 4447] #[8986 8987] #[9193 9196] #[9725 9726] #[9800 9811
 
 zero-ranges := #[#[768 879] #[1155 1161] #[8203 8207] #[8288 8292] #[8400 8447] #[65024 65039] #[65056 65071]]
 
-;; Recursive rather than a filter with a lambda, for the capture reason
-;; described above `sgr-params` — the lambda would close over `cp`.
 fn in-ranges? :: Int Vec Bool
   => cp ranges
-  if (empty? ranges)
-    false
-  else
-    in-range-step cp ranges
-
-fn in-range-step :: Int Vec Bool
-  => cp ranges
-  r := head ranges
-  if ((cp >= (nth 0 r)) && (cp <= (nth 1 r)))
-    true
-  else
-    in-ranges? cp (tail ranges)
+  not (empty? (/? (r -> (cp >= (nth 0 r)) && (cp <= (nth 1 r))) ranges))
 
 ;; Width of a single code point: 0, 1 or 2.
 pub fn char-cells :: Int Int

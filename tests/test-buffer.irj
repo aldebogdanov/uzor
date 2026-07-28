@@ -9,9 +9,17 @@ use uzor.style :open
 st := plain
 bold := style {bold= true}
 
+;; `cp` collides with a parameter inside uzor.style's width table walk,
+;; and `st` with one inside its SGR builder. Both are here on purpose:
+;; a captured parameter used to lose to a same-named global in the
+;; calling program, which silently mismeasured every wide character and
+;; mis-styled every span. Keep the names — the wide-char and style
+;; tests below fail if that regresses.
+cp := 999
+
 ;; ── Rect ────────────────────────────────────────────────────────────
 
-r1 := test "rect clamps negative size" (-> assert-eq 0 (get "w" (rect 0 0 (-5) 3)))
+r1 := test "rect clamps negative size" (-> assert-eq 0 (rect 0 0 (-5) 3).w)
 r2 := test "rect-right" (-> assert-eq 14 (rect-right (rect 4 0 10 2)))
 r3 := test "rect-empty? on zero height" (-> assert-true (rect-empty? (rect 0 0 10 0)))
 
@@ -76,14 +84,14 @@ fn take-straddle
   line-take #[(span "日本" st)] 3
 
 r15 := test "take through a wide char keeps the width" (-> assert-eq 3 (line-width (take-straddle ())))
-r16 := test "take through a wide char pads with a space" (-> assert-eq "日 " (get "text" (nth 0 (take-straddle ()))))
+r16 := test "take through a wide char pads with a space" (-> assert-eq "日 " (nth 0 (take-straddle ())).text)
 
 fn drop-straddle
   =>
   line-drop #[(span "日本" st)] 1
 
 r17 := test "drop through a wide char keeps the width" (-> assert-eq 3 (line-width (drop-straddle ())))
-r18 := test "drop through a wide char pads with a space" (-> assert-eq " 本" (get "text" (nth 0 (drop-straddle ()))))
+r18 := test "drop through a wide char pads with a space" (-> assert-eq " 本" (nth 0 (drop-straddle ())).text)
 
 ;; ── line-splice ─────────────────────────────────────────────────────
 
@@ -92,8 +100,8 @@ fn splice-mid
   line-splice #[(span "hello world" st)] 6 #[(span "there" bold)]
 
 r19 := test "splice keeps total width" (-> assert-eq 11 (line-width (splice-mid ())))
-r20 := test "splice keeps the head" (-> assert-eq "hello " (get "text" (nth 0 (splice-mid ()))))
-r21 := test "splice inserts the new span" (-> assert-eq "there" (get "text" (nth 1 (splice-mid ()))))
+r20 := test "splice keeps the head" (-> assert-eq "hello " (nth 0 (splice-mid ())).text)
+r21 := test "splice inserts the new span" (-> assert-eq "there" (nth 1 (splice-mid ())).text)
 
 fn splice-past-end
   =>
@@ -106,7 +114,7 @@ fn splice-at-zero
   line-splice #[(span "abcdef" st)] 0 #[(span "XY" bold)]
 
 r23 := test "splice at zero overwrites the front" (-> assert-eq 6 (line-width (splice-at-zero ())))
-r24 := test "splice at zero keeps the tail" (-> assert-eq "cdef" (get "text" (nth 1 (splice-at-zero ()))))
+r24 := test "splice at zero keeps the tail" (-> assert-eq "cdef" (nth 1 (splice-at-zero ())).text)
 
 ;; ── Buffer writes ───────────────────────────────────────────────────
 
@@ -135,7 +143,7 @@ fn write-negative-col
   =>
   buf-text (buffer 10 1) 0 (-3) st "abcdefgh"
 
-r29 := test "a negative column clips the front" (-> assert-eq "defgh" (get "text" (nth 0 (buf-line (write-negative-col ()) 0))))
+r29 := test "a negative column clips the front" (-> assert-eq "defgh" (nth 0 (buf-line (write-negative-col ()) 0)).text)
 
 fn fill-region
   =>
@@ -144,4 +152,18 @@ fn fill-region
 r30 := test "fill covers its rows" (-> assert-eq 5 (line-width (buf-line (fill-region ()) 1)))
 r31 := test "fill leaves rows outside alone" (-> assert-true (empty? (buf-line (fill-region ()) 3)))
 
-summarize #[r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15 r16 r17 r18 r19 r20 r21 r22 r23 r24 r25 r26 r27 r28 r29 r30 r31]
+fn bad-rect
+  =>
+  rect-right {x= 1 y= 2 w= 3}
+
+;; The specs earn their keep here: a malformed rect is rejected where
+;; it enters, not three frames later as a nonsense cursor position.
+r32 := test "a rect missing a field is rejected at the boundary" (-> assert-throws (-> bad-rect ()))
+
+fn bad-span
+  =>
+  span-width {text= "hi"}
+
+r33 := test "a span missing its style is rejected" (-> assert-throws (-> bad-span ()))
+
+summarize #[r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15 r16 r17 r18 r19 r20 r21 r22 r23 r24 r25 r26 r27 r28 r29 r30 r31 r32 r33]

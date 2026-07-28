@@ -1,7 +1,7 @@
 mod uzor.core
 
 use std.term {csi}
-use uzor.style {plain sgr cell-width}
+use uzor.style {Style plain sgr cell-width}
 
 ;; The cell buffer and its diff — the layer everything else in uzor
 ;; draws into.
@@ -14,12 +14,17 @@ use uzor.style {plain sgr cell-width}
 ;;
 ;; ── Representation ──
 ;;
-;; A line is a vector of *spans* — `{text= "hi" st= <style>}` — not a
-;; vector of cells. A 200x50 screen is 10 000 cells, and Irij's
-;; vectors are persistent: building one cell at a time is quadratic,
-;; and a per-cell frame would dominate the frame budget on its own. A
-;; line usually holds a handful of spans, so spans keep frames cheap
-;; while `line-splice` still gives exact cell-level placement.
+;; A line is a vector of *spans* — `Span "hi" <style>` — not a vector
+;; of cells. A 200x50 screen is 10 000 cells, and Irij's vectors are
+;; persistent: building one cell at a time is quadratic, and a
+;; per-cell frame would dominate the frame budget on its own. A line
+;; usually holds a handful of spans, so spans keep frames cheap while
+;; `line-splice` still gives exact cell-level placement.
+;;
+;; Rects, spans and buffers are spec values, so every fn boundary
+;; checks the shape it was handed. A line stays a plain `Vec`: it's
+;; touched several times per drawn string, and validating a spec per
+;; element would put a walk of the whole line on every splice.
 ;;
 ;; The diff is per line. A changed line is rewritten whole (cursor
 ;; move, content, erase-to-end-of-line) rather than patched
@@ -38,51 +43,58 @@ pub spec Rect
   w :: Int
   h :: Int
 
-pub fn rect :: Int Int Int Int Map
+;; Negative extents clamp to zero, so an over-inset region is empty
+;; rather than inside-out — `rect-empty?` is then the single check a
+;; widget needs before drawing.
+pub fn rect :: Int Int Int Int Rect
   => x y w h
-  {x= x y= y w= (max 0 w) h= (max 0 h)}
+  Rect x y (max 0 w) (max 0 h)
 
-pub fn rect-right :: Map Int
+pub fn rect-right :: Rect Int
   => r
-  (get "x" r) + (get "w" r)
+  r.x + r.w
 
-pub fn rect-bottom :: Map Int
+pub fn rect-bottom :: Rect Int
   => r
-  (get "y" r) + (get "h" r)
+  r.y + r.h
 
-pub fn rect-empty? :: Map Bool
+pub fn rect-empty? :: Rect Bool
   => r
-  ((get "w" r) <= 0) || ((get "h" r) <= 0)
+  (r.w <= 0) || (r.h <= 0)
 
 ;; Overlap of two rects; an empty rect when they don't touch. Widgets
 ;; clip against their parent with this, so nothing can draw outside the
 ;; region it was given.
-pub fn rect-intersect :: Map Map Map
+pub fn rect-intersect :: Rect Rect Rect
   => a b
-  x0 := max (get "x" a) (get "x" b)
-  y0 := max (get "y" a) (get "y" b)
+  x0 := max a.x b.x
+  y0 := max a.y b.y
   x1 := min (rect-right a) (rect-right b)
   y1 := min (rect-bottom a) (rect-bottom b)
   rect x0 y0 (x1 - x0) (y1 - y0)
 
 ;; Shrink by `n` on every side — the border/padding primitive.
-pub fn rect-inset :: Map Int Map
+pub fn rect-inset :: Rect Int Rect
   => r n
-  rect ((get "x" r) + n) ((get "y" r) + n) ((get "w" r) - (2 * n)) ((get "h" r) - (2 * n))
+  rect (r.x + n) (r.y + n) (r.w - (2 * n)) (r.h - (2 * n))
 
-pub fn rect-contains? :: Map Int Int Bool
+pub fn rect-contains? :: Rect Int Int Bool
   => r col row
-  (col >= (get "x" r)) && (col < (rect-right r)) && (row >= (get "y" r)) && (row < (rect-bottom r))
+  (col >= r.x) && (col < (rect-right r)) && (row >= r.y) && (row < (rect-bottom r))
 
 ;; ── Spans ───────────────────────────────────────────────────────────
 
-pub fn span :: Str Map Map
-  => text st
-  {text= text st= st}
+pub spec Span
+  text :: Str
+  st :: Style
 
-pub fn span-width :: Map Int
+pub fn span :: Str Style Span
+  => text st
+  Span text st
+
+pub fn span-width :: Span Int
   => s
-  cell-width (get "text" s)
+  cell-width s.text
 
 pub fn line-width :: Vec Int
   => line
@@ -142,13 +154,13 @@ fn surrogate-pair-at? :: Str Int Bool
   hi := char-code (char-at s i)
   (hi >= 55296) && (hi <= 56319)
 
-pub fn span-take :: Map Int Map
+pub fn span-take :: Span Int Span
   => s n
-  span (str-take-cells (get "text" s) n) (get "st" s)
+  span (str-take-cells s.text n) s.st
 
-pub fn span-drop :: Map Int Map
+pub fn span-drop :: Span Int Span
   => s n
-  span (str-drop-cells (get "text" s) n) (get "st" s)
+  span (str-drop-cells s.text n) s.st
 
 ;; ── Lines ───────────────────────────────────────────────────────────
 
@@ -164,8 +176,7 @@ fn spaces :: Int Str
 ;; has to put 30 spaces in between, or the text lands at column 10.
 pub fn line-take :: Vec Int Vec
   => line n
-  taken := take-cells line n 0 #[]
-  pad-to taken n
+  pad-to (take-cells line n 0 #[]) n
 
 fn take-cells :: Vec Int Int Vec Vec
   => line n pos acc
@@ -229,9 +240,9 @@ pub spec Buffer
 ;; A blank buffer. Lines start empty rather than filled with spaces:
 ;; rendering pads on the way out, so a frame nobody drew into costs
 ;; almost nothing.
-pub fn buffer :: Int Int Map
+pub fn buffer :: Int Int Buffer
   => cols rows
-  {cols= cols rows= rows lines= (blank-lines rows #[])}
+  Buffer cols rows (blank-lines rows #[])
 
 fn blank-lines :: Int Vec Vec
   => n acc
@@ -240,12 +251,12 @@ fn blank-lines :: Int Vec Vec
   else
     blank-lines n (conj acc #[])
 
-pub fn buf-line :: Map Int Vec
+pub fn buf-line :: Buffer Int Vec
   => buf row
-  if ((row < 0) || (row >= (get "rows" buf)))
+  if ((row < 0) || (row >= buf.rows))
     #[]
   else
-    nth row (get "lines" buf)
+    nth row buf.lines
 
 fn vec-set :: Vec Int _ Vec
   => v i x
@@ -255,40 +266,40 @@ fn vec-set :: Vec Int _ Vec
 ;; and over-long content is trimmed at the buffer's width — a widget
 ;; that miscomputes its own size corrupts its own region, never the
 ;; frame.
-pub fn buf-put :: Map Int Int Vec Map
+pub fn buf-put :: Buffer Int Int Vec Buffer
   => buf row col spans
-  if ((row < 0) || (row >= (get "rows" buf)) || (col >= (get "cols" buf)))
+  if ((row < 0) || (row >= buf.rows) || (col >= buf.cols))
     buf
   else
     buf-put-clipped buf row col spans
 
-fn buf-put-clipped :: Map Int Int Vec Map
+fn buf-put-clipped :: Buffer Int Int Vec Buffer
   => buf row col spans
-  visible := clip-spans spans (max 0 (0 - col)) ((get "cols" buf) - (max 0 col))
+  visible := clip-spans spans (max 0 (0 - col)) (buf.cols - (max 0 col))
   spliced := line-splice (buf-line buf row) (max 0 col) visible
-  assoc buf "lines" (vec-set (get "lines" buf) row spliced)
+  Buffer buf.cols buf.rows (vec-set buf.lines row spliced)
 
 fn clip-spans :: Vec Int Int Vec
   => spans skip limit
   line-take (line-drop spans skip) (min limit (max 0 ((line-width spans) - skip)))
 
 ;; Draw a string. The common case, and the one widgets use.
-pub fn buf-text :: Map Int Int Map Str Map
+pub fn buf-text :: Buffer Int Int Style Str Buffer
   => buf row col st text
   buf-put buf row col #[(span text st)]
 
 ;; Fill a rect with a repeated character — backgrounds, separators,
 ;; the inside of a cleared panel.
-pub fn buf-fill :: Map Map Map Str Map
+pub fn buf-fill :: Buffer Rect Style Str Buffer
   => buf r st ch
-  fill-rows buf r st ch (get "y" r)
+  fill-rows buf r st ch r.y
 
-fn fill-rows :: Map Map Map Str Int Map
+fn fill-rows :: Buffer Rect Style Str Int Buffer
   => buf r st ch row
   if (row >= (rect-bottom r))
     buf
   else
-    fill-rows (buf-text buf row (get "x" r) st (repeat-str ch (get "w" r))) r st ch (row + 1)
+    fill-rows (buf-text buf row r.x st (repeat-str ch r.w)) r st ch (row + 1)
 
 fn repeat-str :: Str Int Str
   => s n
@@ -307,17 +318,17 @@ pub fn render-line :: Vec Str
   if (empty? line)
     ""
   else
-    (fold (acc s -> acc ++ (sgr (get "st" s)) ++ (get "text" s)) "" line) ++ (sgr plain)
+    (fold (acc s -> acc ++ (sgr s.st) ++ s.text) "" line) ++ (sgr plain)
 
 ;; The whole buffer, from a cleared screen. Used for the first frame
 ;; and after a resize.
-pub fn buf-render :: Map Str
+pub fn buf-render :: Buffer Str
   => buf
   (csi "2J") ++ (render-rows buf 0 "")
 
-fn render-rows :: Map Int Str Str
+fn render-rows :: Buffer Int Str Str
   => buf row acc
-  if (row >= (get "rows" buf))
+  if (row >= buf.rows)
     acc
   else
     render-rows buf (row + 1) (acc ++ (move-to (row + 1) 1) ++ (render-line (buf-line buf row)) ++ (csi "K"))
@@ -331,21 +342,21 @@ pub fn move-to :: Int Int Str
 ;; Bytes that carry a terminal showing `prev` to showing `next`.
 ;; A size change can't be patched — everything below the first
 ;; reflowed line has moved — so it falls back to a full repaint.
-pub fn buf-diff :: Map Map Str
+pub fn buf-diff :: Buffer Buffer Str
   => prev next
-  if (((get "cols" prev) /= (get "cols" next)) || ((get "rows" prev) /= (get "rows" next)))
+  if ((prev.cols /= next.cols) || (prev.rows /= next.rows))
     buf-render next
   else
     diff-rows prev next 0 ""
 
-fn diff-rows :: Map Map Int Str Str
+fn diff-rows :: Buffer Buffer Int Str Str
   => prev next row acc
-  if (row >= (get "rows" next))
+  if (row >= next.rows)
     acc
   else
     diff-rows prev next (row + 1) (acc ++ (diff-row prev next row))
 
-fn diff-row :: Map Map Int Str
+fn diff-row :: Buffer Buffer Int Str
   => prev next row
   was := render-line (buf-line prev row)
   now := render-line (buf-line next row)
