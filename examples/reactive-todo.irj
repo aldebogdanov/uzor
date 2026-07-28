@@ -1,0 +1,189 @@
+;; The same todo list as examples/todo.irj, but with its state in a
+;; butterfly signal graph instead of one model record — and undo/redo,
+;; which the graph gives almost for free.
+;;
+;; NEEDS A TTY:
+;;
+;;   irij run examples/reactive-todo.irj
+;;
+;; j/k move · space toggle · f filter · u undo · r redo · q quit
+
+use std.term {Term default-term}
+use butterfly.core {Reactive reactive signal compute deref reset swap}
+use uzor.core :open
+use uzor.style :open
+use uzor.text :open
+use uzor.layout :open
+use uzor.box :open
+use uzor.widgets :open
+use uzor.event :open
+use uzor.reactive :open
+
+;; ── State ───────────────────────────────────────────────────────────
+;;
+;; Three independent signals rather than one record. Nothing here has
+;; to know about the others, and a fourth would not touch these.
+
+fn initial-todos :: Vec
+  =>
+  #[{text= "write the app loop" done= true}
+    {text= "draw a list" done= true}
+    {text= "make state reactive" done= false}
+    {text= "press u to undo" done= false}
+    {text= "press q" done= false}]
+
+;; ── Derived values ──────────────────────────────────────────────────
+;;
+;; Each of these re-runs only when something it reads changes. The view
+;; below reads them, so it inherits the same property.
+
+fn visible-of ::: Reactive
+  => todos hide-done
+  compute (-> filter-todos (deref todos) (deref hide-done))
+
+fn filter-todos :: Vec Bool Vec
+  => todos hide-done
+  if hide-done
+    /? (t -> not (get "done" t)) todos
+  else
+    todos
+
+fn progress-of ::: Reactive
+  => todos
+  compute (-> length (/? (t -> get "done" t) (deref todos)))
+
+;; ── View ────────────────────────────────────────────────────────────
+
+fn view-of ::: Reactive
+  => size-sig visible sel progress todos
+  compute (-> draw-screen (deref size-sig) (deref visible) (deref sel) (deref progress) (length (deref todos)))
+
+fn draw-screen :: Map Vec Int Int Int Buffer
+  => size vis sel done-count total
+  screen := rect 0 0 size.cols size.rows
+  rows := split-v screen #[(Fill 1) (Fixed 1) (Fixed 1)]
+  listed := draw-pane (buffer size.cols size.rows) (nth 0 rows) vis sel
+  statused := draw-progress-labelled listed (nth 1 rows) (style {fg= green}) (style {fg= bright-black}) (style {bold= true}) done-count (max 1 total)
+  draw-label statused (nth 2 rows) (style {fg= bright-black}) "j/k move · space toggle · f filter · u undo · r redo · q quit" (Left)
+
+fn draw-pane :: Buffer Rect Vec Int Buffer
+  => buf r vis sel
+  framed := draw-titled-box buf r (rounded-box ()) (style {fg= cyan}) " todo "
+  draw-list framed (inner r) (list-scroll (list-view (@ label-of vis) sel 0) (inner r).h) plain (style {reverse= true})
+
+fn label-of :: Map Str
+  => t
+  (if (get "done" t) "[x] " else "[ ] ") ++ (get "text" t)
+
+;; ── Dispatch ────────────────────────────────────────────────────────
+;;
+;; Returns :undo / :redo to ask the runtime to rewind the graph;
+;; anything else is a plain signal write.
+
+fn dispatch-of ::: Reactive
+  => todos sel hide-done quit visible
+  (ev -> route todos sel hide-done quit visible ev)
+
+fn route ::: Reactive
+  => todos sel hide-done quit visible ev
+  if (key? ev "u")
+    :undo
+  else
+    route-redo todos sel hide-done quit visible ev
+
+fn route-redo ::: Reactive
+  => todos sel hide-done quit visible ev
+  if (key? ev "r")
+    :redo
+  else
+    route-app todos sel hide-done quit visible ev
+
+fn route-app ::: Reactive
+  => todos sel hide-done quit visible ev
+  if (key? ev "q")
+    reset quit true
+  else
+    route-move todos sel hide-done visible ev
+
+fn route-move ::: Reactive
+  => todos sel hide-done visible ev
+  if ((key? ev "j") || (key? ev "down"))
+    swap sel (n -> min (n + 1) (max 0 ((length (deref visible)) - 1)))
+  else
+    route-up todos sel hide-done visible ev
+
+fn route-up ::: Reactive
+  => todos sel hide-done visible ev
+  if ((key? ev "k") || (key? ev "up"))
+    swap sel (n -> max 0 (n - 1))
+  else
+    route-toggle todos sel hide-done visible ev
+
+fn route-toggle ::: Reactive
+  => todos sel hide-done visible ev
+  if (key? ev "space")
+    toggle todos sel visible
+  else
+    route-filter sel hide-done ev
+
+fn toggle ::: Reactive
+  => todos sel visible
+  vis := deref visible
+  if (empty? vis)
+    ()
+  else
+    flip todos (nth (min (deref sel) ((length vis) - 1)) vis)
+
+fn flip ::: Reactive
+  => todos target
+  swap todos (ts -> @ (t -> flip-one t target) ts)
+
+fn flip-one :: Map Map Map
+  => t target
+  if ((get "text" t) == (get "text" target))
+    {...t done= (not (get "done" t))}
+  else
+    t
+
+fn route-filter ::: Reactive
+  => sel hide-done ev
+  if (key? ev "f")
+    clear-filter sel hide-done
+  else
+    ()
+
+fn clear-filter ::: Reactive
+  => sel hide-done
+  swap hide-done (h -> not h)
+  reset sel 0
+
+;; ── Wiring ──────────────────────────────────────────────────────────
+
+fn setup-of ::: Reactive
+  => todos sel hide-done quit
+  (size-sig -> build todos sel hide-done quit size-sig)
+
+fn build ::: Reactive
+  => todos sel hide-done quit size-sig
+  visible := visible-of todos hide-done
+  progress := progress-of todos
+  view := view-of size-sig visible sel progress todos
+  reactive-app view (dispatch-of todos sel hide-done quit visible) (-> deref quit)
+
+fn main-flow ::: Term Reactive Console
+  =>
+  todos := signal (initial-todos ())
+  sel := signal 0
+  hide-done := signal false
+  quit := signal false
+  final := run-reactive (setup-of todos sel hide-done quit) {alt-screen= true}
+  open-count := length (/? (t -> not (get "done" t)) (deref todos))
+  println ("bye — " ++ (to-str open-count) ++ " still open")
+
+fn go ::: Term Console
+  =>
+  with reactive
+    main-flow ()
+
+with default-term
+  go ()

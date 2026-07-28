@@ -270,15 +270,61 @@ restored after an error.
 
 ## Reactive state
 
-Not yet. The plan is a binding onto **butterfly**: model state in signals, the
-view as a `compute`, a `watch` marking the frame dirty, and `batch` giving one
-propagation wave per event.
+`uzor.app` folds every event into one model. That's the right default and most
+apps should stay there. `uzor.reactive` is the alternative for apps whose state
+stops fitting in one record — state lives in
+[butterfly](https://github.com/aldebogdanov/butterfly) signals, and the view is
+a `compute` over them.
 
-It is deliberately *not* in this release. The loop above is complete without it,
-and butterfly's graph is a single-threaded singleton — bringing it in adds a
-dependency and a set of constraints (all signal writes on the render fiber;
-background work waking the UI through `term-post`) that deserve their own
-change rather than riding along with the loop.
+```irij
+fn build ::: Reactive
+  => todos sel size-sig
+  visible := compute (-> filter-todos (deref todos) …)
+  view    := compute (-> draw-screen (deref size-sig) (deref visible) (deref sel))
+  reactive-app view (ev -> route todos sel ev) (-> deref quit)
+
+run-reactive (setup-of todos sel) {alt-screen= true}
+```
+
+`setup` is handed a signal carrying the terminal size and returns three things:
+the `view` compute, a `dispatch` fn, and `done?`. `run-reactive` returns a
+snapshot of the final graph.
+
+What it buys:
+
+- **Composable state.** Each part of the UI owns its signals. Adding a pane
+  doesn't touch the others, and nothing threads a growing record through every
+  update fn.
+- **Derived values that recompute themselves.** A `compute` re-runs when its
+  inputs change and is cached when they don't. The view is one of them, so an
+  event touching nothing it reads costs no recompute *and* no bytes — the loop
+  compares `sig-version` and skips the frame entirely.
+- **Undo and redo**, below.
+
+What it costs: butterfly's graph is a single-threaded singleton, so every signal
+write happens on the loop's fiber. Background work wakes the UI with
+`term-post` and lets the loop do the writing — it must not reach into the graph
+from another fiber.
+
+### Undo
+
+`dispatch` normally returns `()`. Returning `:undo` or `:redo` asks the runtime
+to rewind or replay the graph instead:
+
+```irij
+if (key? ev "u")
+  :undo
+else
+  …
+```
+
+The history lives in the loop's own recursion, **not** in a signal — it has to,
+because `restore` rewinds the whole graph, so a history kept inside it would be
+rewound too and the second step back would have nowhere to go. It's bounded
+(`history-limit`, 200), since a snapshot holds the whole graph.
+
+`examples/reactive-todo.irj` is the todo list rebuilt this way, with working
+undo/redo.
 
 ## Styles
 
@@ -334,17 +380,19 @@ top-level binding named `st` (irij#11), and don't check product-spec fields
 (irij#12).
 
 ```
-irij test        # 224 tests, no terminal required
+irij test        # 244 tests, no terminal required
 ```
 
 ## Examples
 
 ```
-irij run examples/todo.irj     # needs a tty
+irij run examples/todo.irj            # needs a tty
+irij run examples/reactive-todo.irj   # the same app on signals, with undo
 ```
 
 A list you can move around, tick off and filter, with a progress bar and a help
-line — about 150 lines, most of it the model.
+line — about 150 lines, most of it the model. The reactive version splits that
+model into signals and adds undo/redo.
 
 ## License
 

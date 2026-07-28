@@ -1,0 +1,216 @@
+mod uzor.reactive
+
+use std.term {Term term-enter term-leave term-size term-read term-write term-flush csi}
+use butterfly.core {Reactive Sig signal compute deref reset batch sig-version snapshot restore}
+use uzor.core {Buffer buffer buf-render buf-diff}
+use uzor.event {resize-event? eof-event?}
+
+;; The app loop, driven by a signal graph instead of a model value.
+;;
+;; `uzor.app` folds every event into one model and redraws from it.
+;; That is the right default and most apps should stay there. This is
+;; the alternative for apps whose state stops fitting in one record:
+;;
+;;   - **Composable state.** Each part of the UI owns its own signals.
+;;     Nothing has to thread a growing model record through every
+;;     update fn, and adding a pane doesn't touch the others.
+;;   - **Derived values that recompute themselves.** A `compute` over
+;;     the signals it reads is re-run when they change and cached when
+;;     they don't — including the view itself.
+;;   - **Time travel.** The graph snapshots as a value, so undo and
+;;     redo are the runtime rewinding it. See `Undo`, below.
+;;
+;; What it costs: butterfly's graph is a single-threaded singleton, so
+;; every signal write must happen on the fiber running the loop.
+;; Background work wakes the UI with `term-post` and lets the loop do
+;; the writing — it must not reach into the graph from another fiber.
+;;
+;; ── Shape ──
+;;
+;; An app supplies a `setup` fn. It is handed a signal carrying the
+;; terminal size and returns the three things the loop needs:
+;;
+;;   view       a compute producing a Buffer
+;;   dispatch   event -> () — writes signals; may return :undo / :redo
+;;   done?      () -> Bool  — reads signals
+;;
+;; `setup` is where the app creates its signals, so they are created
+;; inside the graph the loop owns.
+
+pub spec ReactiveApp
+  view :: Sig
+  dispatch :: Fn
+  done? :: Fn
+
+pub fn reactive-app :: Sig Fn Fn ReactiveApp
+  => view dispatch done?
+  ReactiveApp view dispatch done?
+
+;; ── Undo ────────────────────────────────────────────────────────────
+;;
+;; `dispatch` normally returns `()`. Returning `:undo` or `:redo` asks
+;; the loop to rewind or replay the graph instead of taking the write
+;; it just made.
+;;
+;; The history lives in the loop's own recursion, *not* in a signal.
+;; It has to: `restore` rewinds the whole graph, so a history kept
+;; inside the graph would be rewound along with everything else and
+;; you could never take a second step back.
+;;
+;; Bounded, because a snapshot holds the whole graph. Old entries fall
+;; off the front rather than growing without limit in a long session.
+pub history-limit := 200
+
+;; ── Running ─────────────────────────────────────────────────────────
+
+;; Run until `done?` says otherwise. Returns a snapshot of the final
+;; graph, so a caller can read the end state out of it.
+;;
+;; Autowrap off and the terminal restored on the way out, exactly as
+;; `uzor.app` does — including when the app errors.
+pub fn run-reactive :: Fn Map Map ::: Term Reactive
+  => setup opts
+  term-enter opts
+  term-write (csi "?7l")
+  term-flush ()
+  result := try (-> reactive-guarded setup)
+  term-write (csi "?7h")
+  term-flush ()
+  term-leave ()
+  match result
+    Ok snap => snap
+    Err msg => error msg
+
+fn reactive-guarded :: Fn Map ::: Term Reactive
+  => setup
+  size-sig := signal (term-size ())
+  a := setup size-sig
+  first := deref a.view
+  term-write (buf-render first)
+  term-flush ()
+  loop-reactive a first size-sig (sig-version a.view) #[] #[]
+
+;; One self-recursive fn — the same rule as `uzor.app`. A chain of
+;; helpers would grow the state machine's continuation stack by a frame
+;; per event and die after a couple of thousand of them.
+fn loop-reactive :: ReactiveApp Buffer Sig Int Vec Vec Map ::: Term Reactive
+  => a prev size-sig last-ver past future
+  ev := term-read 50
+  before := snapshot ()
+  msg := apply-event a ev size-sig
+  moved := time-travel msg past future before (snapshot ())
+  frame := deref a.view
+  ver := sig-version a.view
+  shown := paint prev frame (ver /= last-ver) (resize-event? ev)
+  if ((eof-event? ev) || (a.done? ()))
+    snapshot ()
+  else
+    loop-reactive a shown size-sig ver (nth 0 moved) (nth 1 moved)
+
+;; A resize is the loop's own business — it writes the size signal, and
+;; every compute that reads it recomputes. The event still reaches
+;; dispatch afterwards, in case the app wants to know.
+;;
+;; One batch per event: writes commit immediately, but watchers see a
+;; single wave rather than one per signal touched.
+fn apply-event :: ReactiveApp Map Sig _ ::: Reactive
+  => a ev size-sig
+  if (resize-event? ev)
+    reset size-sig {cols= (get "cols" ev) rows= (get "rows" ev)}
+  else
+    ()
+  batch (-> a.dispatch ev)
+
+;; Returns #(past future). Rewinding is deliberately not a signal
+;; write: it replaces the graph wholesale, so it happens outside the
+;; batch and outside the app's own state.
+fn time-travel :: _ Vec Vec Map Map Tuple ::: Reactive
+  => msg past future before after
+  if (msg == :undo)
+    step-back past future before
+  else
+    forward-or-record msg past future before after
+
+fn forward-or-record :: _ Vec Vec Map Map Tuple ::: Reactive
+  => msg past future before after
+  if (msg == :redo)
+    step-forward past future before
+  else
+    record-if-changed past future before after
+
+;; Only an event that actually moved the graph goes into the history.
+;;
+;; Recording every event instead looks harmless and is not: `term-read`
+;; times out several times a second, and each timeout pushed another
+;; copy of the unchanged state. Undo then walked back through those and
+;; appeared to do nothing at all — which is exactly how it behaved
+;; interactively while every scripted test passed, because the scripts
+;; send keys and never a timeout.
+;;
+;; A fresh change also drops the redo stack: once history has branched,
+;; the old forward path is not somewhere the user can get back to.
+fn record-if-changed :: Vec Vec Map Map Tuple
+  => past future before after
+  if (before == after)
+    #(past future)
+  else
+    #((remember past before) #[])
+
+fn step-back :: Vec Vec Map Tuple ::: Reactive
+  => past future before
+  if (empty? past)
+    #(past future)
+  else
+    restore-to (last past) (take ((length past) - 1) past) (conj future before)
+
+fn step-forward :: Vec Vec Map Tuple ::: Reactive
+  => past future before
+  if (empty? future)
+    #(past future)
+  else
+    restore-to (last future) (conj past before) (take ((length future) - 1) future)
+
+fn restore-to :: Map Vec Vec Tuple ::: Reactive
+  => snap past future
+  restore snap
+  #(past future)
+
+;; Bounded history — a snapshot holds the whole graph, so a long
+;; session would otherwise accumulate one per keystroke forever.
+fn remember :: Vec Map Vec
+  => past before
+  grown := conj past before
+  if ((length grown) > history-limit)
+    drop ((length grown) - history-limit) grown
+  else
+    grown
+
+;; A resize has no previous frame worth diffing against — everything
+;; below the first reflowed line has moved — so it repaints. Otherwise
+;; the frame goes out only when the graph says it changed: an event
+;; that touched nothing the view reads costs no bytes at all.
+fn paint :: Buffer Buffer Bool Bool Buffer ::: Term
+  => prev frame changed? full?
+  if full?
+    write-full frame
+  else
+    write-diff prev frame changed?
+
+fn write-full :: Buffer Buffer ::: Term
+  => frame
+  term-write (buf-render frame)
+  term-flush ()
+  frame
+
+fn write-diff :: Buffer Buffer Bool Buffer ::: Term
+  => prev frame changed?
+  if changed?
+    write-flush prev frame
+  else
+    prev
+
+fn write-flush :: Buffer Buffer Buffer ::: Term
+  => prev frame
+  term-write (buf-diff prev frame)
+  term-flush ()
+  frame

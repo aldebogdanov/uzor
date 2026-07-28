@@ -1,2 +1,3 @@
 [seeds]
 uzor = { path = ".." }
+butterfly = "0.1"
