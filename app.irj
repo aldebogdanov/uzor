@@ -43,11 +43,15 @@ pub fn app :: _ Fn Fn Fn App
 ;; ── Running ─────────────────────────────────────────────────────────
 ;;
 ;; Autowrap (DECAWM) is turned off for the duration. A frame is exactly
-;; `cols` cells per row, so every full-width row writes the last column
-;; — and with autowrap on, the bottom-right cell scrolls the screen,
-;; taking the top line with it and leaving the right-hand border a
-;; column short. Off, the last cell is just a cell. Restored on the way
-;; out, since a shell with autowrap disabled is unusable.
+;; `cols` cells per row, so every full-width row writes the last
+;; column, and a stray write past it would scroll the whole screen.
+;; Restored on the way out, since a shell with autowrap disabled is
+;; unusable.
+;;
+;; This is insurance, not the fix for the missing right-hand border —
+;; that was an erase-to-end-of-line emitted *after* the row's content
+;; (see `clear-row` in uzor.core), which wiped the last cell whatever
+;; autowrap was doing.
 
 ;; Run until `done?` says otherwise; returns the final model.
 ;;
