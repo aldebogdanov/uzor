@@ -275,6 +275,57 @@ fn over-undo-scenario
 
 r6 := test "undo past the start is a no-op" (-> assert-eq 0 (over-undo-scenario ()))
 
+
+;; ── Undo with idle ticks between the keys ───────────────────────────
+;;
+;; The case every scripted test above misses. A live `term-read` times
+;; out several times a second, so the real event stream is mostly
+;; `{kind= "none"}` — and history recorded per *event* filled up with
+;; copies of the unchanged state, leaving undo to walk back through
+;; those and appear dead. Only a change goes into the history now.
+
+handler idle-between :: Term
+  script :! #["down" "none" "none" "down" "none" "none" "none" "u" "q"]
+  term-enter opts => resume ()
+  term-leave () => resume ()
+  term-size () => resume {cols= 16 rows= 4}
+  term-read ms =>
+    if (empty? script)
+      resume {kind= "eof"}
+    else
+      k := head script
+      script <- tail script
+      resume (as-event k)
+  term-post ev => resume ()
+  term-write s => resume ()
+  term-flush () => resume ()
+  term-str-width s => resume (length s)
+
+fn as-event :: Str Map
+  => k
+  if (k == "none")
+    {kind= "none"}
+  else
+    {kind= "key" key= k ch= "" mods= #[]}
+
+fn run-idle-undo ::: Term Reactive
+  =>
+  sel := signal 0
+  quit := signal false
+  holder := signal ()
+  snap := run-reactive (undo-setup sel quit holder) {}
+  deref sel
+
+fn idle-undo-scenario
+  =>
+  with idle-between
+    with reactive
+      run-idle-undo ()
+
+;; Two moves with timeouts scattered through them, then one undo: back
+;; to one move, not stuck at two.
+r6b := test "idle ticks don't fill the history" (-> assert-eq 1 (idle-undo-scenario ()))
+
 ;; ── Resize ──────────────────────────────────────────────────────────
 ;; The loop writes the size signal, so every compute reading it
 ;; recomputes — the view included. The event still reaches dispatch.
@@ -351,4 +402,4 @@ fn many-scenario
 
 r9 := test "the loop survives a long session" (-> assert-eq 20000 (many-scenario ()))
 
-summarize #[r1 r2 r3 r4 r5 r6 r7 r8 r9]
+summarize #[r1 r2 r3 r4 r5 r6 r6b r7 r8 r9]

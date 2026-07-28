@@ -98,7 +98,7 @@ fn loop-reactive :: ReactiveApp Buffer Sig Int Vec Vec Map ::: Term Reactive
   ev := term-read 50
   before := snapshot ()
   msg := apply-event a ev size-sig
-  moved := time-travel msg past future before
+  moved := time-travel msg past future before (snapshot ())
   frame := deref a.view
   ver := sig-version a.view
   shown := paint prev frame (ver /= last-ver) (resize-event? ev)
@@ -124,19 +124,37 @@ fn apply-event :: ReactiveApp Map Sig _ ::: Reactive
 ;; Returns #(past future). Rewinding is deliberately not a signal
 ;; write: it replaces the graph wholesale, so it happens outside the
 ;; batch and outside the app's own state.
-fn time-travel :: _ Vec Vec Map Tuple ::: Reactive
-  => msg past future before
+fn time-travel :: _ Vec Vec Map Map Tuple ::: Reactive
+  => msg past future before after
   if (msg == :undo)
     step-back past future before
   else
-    forward-or-record msg past future before
+    forward-or-record msg past future before after
 
-fn forward-or-record :: _ Vec Vec Map Tuple ::: Reactive
-  => msg past future before
+fn forward-or-record :: _ Vec Vec Map Map Tuple ::: Reactive
+  => msg past future before after
   if (msg == :redo)
     step-forward past future before
   else
-    #((remember past before) future)
+    record-if-changed past future before after
+
+;; Only an event that actually moved the graph goes into the history.
+;;
+;; Recording every event instead looks harmless and is not: `term-read`
+;; times out several times a second, and each timeout pushed another
+;; copy of the unchanged state. Undo then walked back through those and
+;; appeared to do nothing at all — which is exactly how it behaved
+;; interactively while every scripted test passed, because the scripts
+;; send keys and never a timeout.
+;;
+;; A fresh change also drops the redo stack: once history has branched,
+;; the old forward path is not somewhere the user can get back to.
+fn record-if-changed :: Vec Vec Map Map Tuple
+  => past future before after
+  if (before == after)
+    #(past future)
+  else
+    #((remember past before) #[])
 
 fn step-back :: Vec Vec Map Tuple ::: Reactive
   => past future before
