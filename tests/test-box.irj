@@ -1,0 +1,113 @@
+use std.test :open
+use uzor.core :open
+use uzor.style :open
+use uzor.layout :open
+use uzor.box :open
+
+st := plain
+
+;; A drawn box is still just a buffer, so it's read back cell by cell.
+
+fn boxed
+  =>
+  draw-box (buffer 10 4) (rect 0 0 10 4) (single-box ()) st
+
+fn row-text
+  => buf row
+  fold (acc s -> acc ++ s.text) "" (buf-line buf row)
+
+r1 := test "top edge has corners and a rule" (-> assert-eq "┌────────┐" (row-text (boxed ()) 0))
+r2 := test "bottom edge closes the frame" (-> assert-eq "└────────┘" (row-text (boxed ()) 3))
+r3 := test "sides are drawn on the interior rows" (-> assert-eq "│" (nth 0 (buf-line (boxed ()) 1)).text)
+r4 := test "the right side sits at the last column" (-> assert-eq 10 (line-width (buf-line (boxed ()) 1)))
+
+;; The interior is untouched — draw-box draws a frame, not a fill.
+r5 := test "the interior is left alone" (-> assert-eq "│        │" (row-text (boxed ()) 1))
+
+;; ── Degenerate sizes ────────────────────────────────────────────────
+;; A frame needs two cells in each direction to have an inside. One
+;; cell wide would put the left and right edges in the same column.
+
+fn too-narrow
+  =>
+  draw-box (buffer 10 4) (rect 0 0 1 4) (single-box ()) st
+
+r6 := test "a one-cell-wide box draws nothing" (-> assert-eq (buffer 10 4) (too-narrow ()))
+
+fn too-short
+  =>
+  draw-box (buffer 10 4) (rect 0 0 10 1) (single-box ()) st
+
+r7 := test "a one-row box draws nothing" (-> assert-eq (buffer 10 4) (too-short ()))
+
+;; ── Offset boxes ────────────────────────────────────────────────────
+
+fn offset
+  =>
+  draw-box (buffer 20 6) (rect 5 1 6 4) (single-box ()) st
+
+r8 := test "an offset box starts at its own column" (-> assert-eq "     ┌────┐" (row-text (offset ()) 1))
+r9 := test "rows above the box stay empty" (-> assert-true (empty? (buf-line (offset ()) 0)))
+
+;; ── Line sets ───────────────────────────────────────────────────────
+
+fn with-chars
+  => chars
+  row-text (draw-box (buffer 6 3) (rect 0 0 6 3) chars st) 0
+
+r10 := test "rounded corners" (-> assert-eq "╭────╮" (with-chars (rounded-box ())))
+r11 := test "double lines" (-> assert-eq "╔════╗" (with-chars (double-box ())))
+r12 := test "heavy lines" (-> assert-eq "┏━━━━┓" (with-chars (heavy-box ())))
+;; The escape hatch for a terminal that mangles the box-drawing block.
+r13 := test "ascii fallback keeps the shape" (-> assert-eq "+----+" (with-chars (ascii-box ())))
+
+;; ── Titles ──────────────────────────────────────────────────────────
+
+fn titled
+  => title width
+  row-text (draw-titled-box (buffer 40 3) (rect 0 0 width 3) (single-box ()) st title) 0
+
+r14 := test "a title is let into the top edge" (-> assert-eq "┌ hi ─────┐" (titled "hi" 11))
+r15 := test "an empty title leaves the edge alone" (-> assert-eq "┌─────────┐" (titled "" 11))
+
+;; A title that outgrew its edge must not push the corner off the end —
+;; that would leave the frame visibly unbalanced.
+r16 := test "a long title is truncated, not overflowed" (-> assert-eq 11 (cell-width (titled "a very long title indeed" 11)))
+r17 := test "truncation keeps the closing corner" (-> assert-eq "┐" (substring (titled "a very long title indeed" 11) 10 11))
+
+;; Truncating by characters rather than cells would let a CJK title
+;; measure a cell longer than its budget and eat the corner.
+r17b := test "a wide-char title still fits its budget" (-> assert-eq 11 (cell-width (titled "日本語のタイトル" 11)))
+fn last-char
+  => s
+  substring s ((length s) - 1) (length s)
+
+;; Indexed from the end: with wide glyphs the row is 11 cells but only
+;; 8 UTF-16 units, so a cell offset would land in the wrong place.
+r17c := test "a wide-char title keeps the corner" (-> assert-eq "┐" (last-char (titled "日本語のタイトル" 11)))
+
+;; ── Panels ──────────────────────────────────────────────────────────
+
+fn over-content
+  =>
+  scribbled := buf-text (buffer 12 4) 1 1 st "old content"
+  draw-panel scribbled (rect 0 0 12 4) (single-box ()) st
+
+;; A modal that only drew its border would show the old frame through
+;; its middle.
+r18 := test "a panel clears what was underneath" (-> assert-eq "│          │" (row-text (over-content ()) 1))
+r19 := test "an empty rect panels nothing" (-> assert-eq (buffer 12 4) (draw-panel (buffer 12 4) (rect 0 0 0 0) (single-box ()) st))
+
+;; ── With layout ─────────────────────────────────────────────────────
+;; The pairing U2 exists for: split a region, frame a part of it, draw
+;; inside the frame.
+
+fn framed-pane
+  =>
+  panes := split-h (rect 0 0 20 5) #[(Fixed 10) (Fill 1)]
+  framed := draw-box (buffer 20 5) (nth 0 panes) (single-box ()) st
+  buf-text framed ((inner (nth 0 panes)).y) ((inner (nth 0 panes)).x) st "in"
+
+r20 := test "content lands inside the frame" (-> assert-eq "│in      │" (substring (row-text (framed-pane ()) 1) 0 10))
+
+summarize #[r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15 r16 r17 r17b r17c r18 r19 r20]

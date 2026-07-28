@@ -4,7 +4,7 @@ Terminal UI toolkit for [Irij](https://irij.online). Cell buffers, layout,
 widgets — built on `std.term`'s `Term` effect, with the whole rendering path
 kept pure so a TUI can be tested without a screen.
 
-**v0.1 is the buffer layer only.** Layout, widgets and the app loop land next.
+**v0.1 is the buffer and layout layers.** Widgets and the app loop land next.
 
 ```irij
 use uzor.core :open
@@ -87,6 +87,59 @@ Each span carries its full SGR state followed by a reset. A differential
 encoder would have to know what the terminal is already showing, and any drift
 smears colour across the screen.
 
+## Layout
+
+Splitting a region into sub-regions, one axis at a time. Nesting the two
+directions covers every layout the widget set needs, and the whole thing stays
+a pure function from a rect and a list of constraints to a list of rects — no
+solver state, no back-tracking, no invalidation.
+
+| constraint | |
+|---|---|
+| `Fixed n` | exactly `n` cells |
+| `Percent n` | `n`% of the region, rounded down |
+| `Fill w` | share of what's left, weighted |
+| `Min n` | at least `n`, then shares like a fill |
+| `Max n` | shares like a fill, but stops at `n` |
+
+| fn | spec | |
+|---|---|---|
+| `solve` | `Int Vec Vec` | sizes along one axis |
+| `split-h` / `split-v` | `Rect Vec Vec` | left-to-right / top-to-bottom |
+| `grid` | `Rect Vec Vec Vec` | rows of columns; a cell is `nth col (nth row g)` |
+| `center` | `Rect Int Int Rect` | a `w`×`h` region centred, clamped to the parent |
+| `pad` | `Rect Int Int Int Int Rect` | uneven inset, CSS order (top, right, bottom, left) |
+| `inner` | `Rect Rect` | one-cell inset — the inside of a border |
+
+```irij
+panes := split-h (rect 0 0 80 24) #[(Fixed 20) (Fill 1)]
+rows  := split-v (nth 1 panes) #[(Fixed 1) (Fill 1) (Fixed 1)]
+```
+
+**Sizes sum to exactly the region.** The last flexible child absorbs the
+rounding, so a three-way split of 100 comes out 33/33/34 rather than losing a
+cell — a lost cell is a column of stale content that nothing ever redraws.
+Over-subscription (a fixed sidebar in a narrow terminal) clamps: earlier
+children win, later ones collapse to zero, and nothing ever goes negative.
+
+## Borders
+
+`uzor.box` draws frames — `single-box`, `rounded-box`, `double-box`,
+`heavy-box`, and `ascii-box` for a terminal that mangles the box-drawing
+block. Same shape, so swapping the set changes nothing else.
+
+| fn | spec | |
+|---|---|---|
+| `draw-box` | `Buffer Rect BoxChars Style Buffer` | a frame; interior untouched |
+| `draw-titled-box` | `Buffer Rect BoxChars Style Str Buffer` | title let into the top edge |
+| `draw-panel` | `Buffer Rect BoxChars Style Buffer` | frame plus a cleared interior |
+
+A box narrower or shorter than two cells has no inside, so it draws nothing
+rather than smearing its two edges into one column. Titles truncate by cells,
+so a CJK title can't measure a cell over budget and overwrite the corner. Use
+`draw-panel` for anything floating — a modal that only drew its border would
+show the old frame through its middle.
+
 ## Styles
 
 `style {fg= red bold= true}` fills the rest from the defaults; the result is
@@ -128,19 +181,20 @@ A *line* is deliberately a plain `Vec` of spans. It's touched several times per
 drawn string, and validating a spec per element would put a walk of the whole
 line on every splice.
 
-Note that Irij product specs currently check field **presence** only. The
-declared field types (`x :: Int`) are parsed and then dropped at registration,
-so `{x= "nope" y= 0 w= 0 h= 0}` satisfies `Rect`, and any value carrying a
-superset of the field names passes too. Sum specs *are* discriminated (tag must
-be a declared variant, arity checked) — this gap is products only.
+Product specs are closed and their field types are checked, so `Rect` means
+exactly four Int fields: a wrong type, a missing field and an extra field are
+all rejected where the value enters. Construction is checked too, so a bad
+`Rect` is caught where it is built rather than three frames later as a nonsense
+cursor position.
 
 ## Development
 
-Needs an Irij with the lambda-capture fix (irij#11) — an earlier build
-mis-renders styles when a program has a top-level binding named `st`.
+Needs Irij ≥ 0.8.8 — earlier builds mis-render styles when a program has a
+top-level binding named `st` (irij#11), and don't check product-spec fields
+(irij#12).
 
 ```
-irij test        # 54 tests, no terminal required
+irij test        # 110 tests, no terminal required
 ```
 
 ## License

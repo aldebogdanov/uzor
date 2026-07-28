@@ -1,0 +1,185 @@
+mod uzor.layout
+
+use uzor.core {Rect rect rect-right rect-bottom rect-inset}
+
+;; Splitting a region into sub-regions.
+;;
+;; One axis at a time, one constraint per child, solved left-to-right
+;; (or top-to-bottom). Nesting the two directions covers every layout
+;; the widget set needs, and keeps the whole thing a pure function from
+;; a rect and a list of constraints to a list of rects — no solver
+;; state, no back-tracking, no invalidation.
+;;
+;; Not flexbox. A terminal grid is small and integral: the interesting
+;; failure mode isn't "which of several valid solutions" but "the sum
+;; didn't come out to the width", and a left-to-right pass with a
+;; single absorbing remainder makes that impossible by construction.
+
+;; ── Constraints ─────────────────────────────────────────────────────
+
+;; Sizes along the axis being split:
+;;
+;;   Fixed n     exactly n cells
+;;   Percent n   n% of the region, rounded down
+;;   Fill w      share of what's left, weighted (Fill 2 takes twice
+;;               as much as Fill 1)
+;;   Min n       at least n — as Fill 1, but never squeezed below n
+;;   Max n       at most n — as Fill 1, but never grown past n
+pub spec Size
+  Fixed Int
+  Percent Int
+  Fill Int
+  Min Int
+  Max Int
+
+;; The size a constraint asks for before any remainder is shared out.
+;; Fill asks for nothing; Min and Max ask for their bound.
+fn base-size :: Size Int Int
+  => c total
+  match c
+    Fixed n => max 0 n
+    Percent n => (max 0 (min 100 n)) * total / 100
+    Fill w => 0
+    Min n => max 0 n
+    Max n => 0
+
+;; Weight in the remainder split. Only Fill carries one; Min and Max
+;; take an equal share on top of their bound.
+fn weight-of :: Size Int
+  => c
+  match c
+    Fixed n => 0
+    Percent n => 0
+    Fill w => max 1 w
+    Min n => 1
+    Max n => 1
+
+fn cap-of :: Size Int
+  => c
+  match c
+    Max n => max 0 n
+    Fixed n => max 0 n
+    Percent n => 1000000
+    Fill w => 1000000
+    Min n => 1000000
+
+;; ── Solving one axis ────────────────────────────────────────────────
+
+;; Sizes for `constraints` across `total` cells. The result always sums
+;; to exactly `total` when the bases fit: the last flexible child
+;; absorbs the rounding, so a 3-way split of 100 never comes out at 99.
+pub fn solve :: Int Vec Vec
+  => total constraints
+  bases := @ (c -> base-size c total) constraints
+  used := fold (a b -> a + b) 0 bases
+  if (used >= total)
+    shrink bases total
+  else
+    grow constraints bases (total - used)
+
+;; Over-subscribed: hand out what there is, in order, and give later
+;; children nothing rather than negative widths.
+fn shrink :: Vec Int Vec
+  => bases left
+  if (empty? bases)
+    #[]
+  else
+    shrink-step bases left
+
+fn shrink-step :: Vec Int Vec
+  => bases left
+  b := head bases
+  take-now := max 0 (min b left)
+  concat #[take-now] (shrink (tail bases) (left - take-now))
+
+;; Spare cells go to the weighted children. Walked one child at a time
+;; so the remainder is exact: each child takes its share of what is
+;; *still* unassigned, and the last weighted child takes the rest.
+fn grow :: Vec Vec Int Vec
+  => constraints bases spare
+  total-weight := fold (a c -> a + (weight-of c)) 0 constraints
+  if (total-weight == 0)
+    bases
+  else
+    grow-walk constraints bases spare total-weight #[]
+
+fn grow-walk :: Vec Vec Int Int Vec Vec
+  => constraints bases spare weight-left acc
+  if (empty? constraints)
+    acc
+  else
+    grow-step constraints bases spare weight-left acc
+
+fn grow-step :: Vec Vec Int Int Vec Vec
+  => constraints bases spare weight-left acc
+  c := head constraints
+  b := head bases
+  w := weight-of c
+  share := grow-share w weight-left spare
+  got := min (b + share) (cap-of c)
+  grow-walk (tail constraints) (tail bases) (spare - (got - b)) (weight-left - w) (conj acc got)
+
+;; The last weighted child takes everything left over, which is what
+;; makes the sizes sum exactly rather than losing cells to rounding.
+fn grow-share :: Int Int Int Int
+  => w weight-left spare
+  if (w == 0)
+    0
+  else
+    if (w >= weight-left)
+      spare
+    else
+      w * spare / weight-left
+
+;; ── Splitting a rect ────────────────────────────────────────────────
+
+;; Left to right. Children fill the region's full height.
+pub fn split-h :: Rect Vec Vec
+  => r constraints
+  cut-h r (solve r.w constraints) r.x #[]
+
+fn cut-h :: Rect Vec Int Vec Vec
+  => r widths x acc
+  if (empty? widths)
+    acc
+  else
+    cut-h r (tail widths) (x + (head widths)) (conj acc (rect x r.y (head widths) r.h))
+
+;; Top to bottom. Children fill the region's full width.
+pub fn split-v :: Rect Vec Vec
+  => r constraints
+  cut-v r (solve r.h constraints) r.y #[]
+
+fn cut-v :: Rect Vec Int Vec Vec
+  => r heights y acc
+  if (empty? heights)
+    acc
+  else
+    cut-v r (tail heights) (y + (head heights)) (conj acc (rect r.x y r.w (head heights)))
+
+;; Rows first, then columns within each row: a Vec of row-Vecs, so a
+;; cell is `nth col (nth row g)`. Rows before columns because that's
+;; the order a screen is read and drawn in.
+pub fn grid :: Rect Vec Vec Vec
+  => r row-sizes col-sizes
+  @ (band -> split-h band col-sizes) (split-v r row-sizes)
+
+;; ── Placement helpers ───────────────────────────────────────────────
+
+;; A `w` x `h` region centred in `r`, clamped so it never escapes.
+pub fn center :: Rect Int Int Rect
+  => r w h
+  cw := min w r.w
+  ch := min h r.h
+  rect (r.x + ((r.w - cw) / 2)) (r.y + ((r.h - ch) / 2)) cw ch
+
+;; Uneven insets — `pad r 1 2 1 2` for the usual "one row, two columns"
+;; breathing room. Order is the CSS one: top, right, bottom, left.
+pub fn pad :: Rect Int Int Int Int Rect
+  => r top right bottom left
+  rect (r.x + left) (r.y + top) (r.w - left - right) (r.h - top - bottom)
+
+;; Whole-region inset by one on every side — the inside of a border.
+pub fn inner :: Rect Rect
+  => r
+  rect-inset r 1
