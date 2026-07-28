@@ -1,0 +1,181 @@
+;; A small but complete uzor app: a list you can move around, tick off
+;; and filter, with a status bar and a help line.
+;;
+;; NEEDS A TTY:
+;;
+;;   irij run examples/todo.irj
+;;
+;; j/k or ↑/↓ to move, space to toggle, a to add, f to filter, q to quit.
+
+use std.term {default-term}
+use uzor.core :open
+use uzor.style :open
+use uzor.text :open
+use uzor.layout :open
+use uzor.box :open
+use uzor.widgets :open
+use uzor.event :open
+use uzor.app :open
+
+;; ── Model ───────────────────────────────────────────────────────────
+;;
+;; One value. Every frame is a function of it, so there is no way for
+;; what's drawn and what's true to drift apart.
+
+fn initial-model :: Map
+  =>
+  {todos= #[{text= "write the app loop" done= true}
+            {text= "draw a list" done= true}
+            {text= "tick something off" done= false}
+            {text= "resize the window" done= false}
+            {text= "press q" done= false}]
+   sel= 0
+   offset= 0
+   hide-done= false
+   adding= false
+   draft= (input "" 0)
+   quit= false}
+
+;; ── Update ──────────────────────────────────────────────────────────
+
+keys := keymap #[#["q" :quit] #["j" :down] #["down" :down] #["k" :up] #["up" :up]
+                 #["space" :toggle] #["f" :filter] #["a" :add]]
+
+fn update-model :: Map Map Map
+  => m ev
+  if m.adding
+    edit-draft m ev
+  else
+    browse m ev
+
+fn browse :: Map Map Map
+  => m ev
+  msg := lookup keys ev
+  if (msg == ())
+    m
+  else
+    apply-msg m msg
+
+fn apply-msg :: Map _ Map
+  => m msg
+  match msg
+    :quit => {...m quit= true}
+    :down => {...m sel= (min (m.sel + 1) (max 0 ((length (visible m)) - 1)))}
+    :up => {...m sel= (max 0 (m.sel - 1))}
+    :toggle => toggle-selected m
+    :filter => {...m hide-done= (not m.hide-done) sel= 0 offset= 0}
+    :add => {...m adding= true draft= (input "" 0)}
+    _ => m
+
+;; The filtered view is what the user is pointing at, so the selection
+;; indexes into it — not into the underlying list. Toggling has to map
+;; back to find the real todo.
+fn visible :: Map Vec
+  => m
+  if m.hide-done
+    /? (t -> not (get "done" t)) m.todos
+  else
+    m.todos
+
+fn toggle-selected :: Map Map
+  => m
+  vis := visible m
+  if (empty? vis)
+    m
+  else
+    {...m todos= (@ (t -> flip-if-same t (nth m.sel vis)) m.todos)}
+
+fn flip-if-same :: Map Map Map
+  => t target
+  if ((get "text" t) == (get "text" target))
+    {...t done= (not (get "done" t))}
+  else
+    t
+
+;; ── The add-a-todo line ─────────────────────────────────────────────
+
+fn edit-draft :: Map Map Map
+  => m ev
+  if (key? ev "escape")
+    {...m adding= false}
+  else
+    if (key? ev "enter")
+      commit-draft m
+    else
+      {...m draft= (edit-input m.draft ev)}
+
+fn commit-draft :: Map Map
+  => m
+  text := m.draft.text
+  if (text == "")
+    {...m adding= false}
+  else
+    {...m adding= false todos= (conj m.todos {text= text done= false})}
+
+fn edit-input :: Input Map Input
+  => inp ev
+  if (key? ev "backspace")
+    backspace inp
+  else
+    if (printable? ev)
+      input (inp.text ++ (get "ch" ev)) (inp.cursor + 1)
+    else
+      inp
+
+fn backspace :: Input Input
+  => inp
+  if ((length inp.text) == 0)
+    inp
+  else
+    input (substring inp.text 0 ((length inp.text) - 1)) (max 0 (inp.cursor - 1))
+
+;; ── View ────────────────────────────────────────────────────────────
+
+fn view-model :: Map Map Buffer
+  => m size
+  screen := rect 0 0 size.cols size.rows
+  rows := split-v screen #[(Fill 1) (Fixed 1) (Fixed 1)]
+  listed := draw-todo-pane (buffer size.cols size.rows) (nth 0 rows) m
+  statused := draw-status listed (nth 1 rows) m
+  draw-footer statused (nth 2 rows) m
+
+fn draw-todo-pane :: Buffer Rect Map Buffer
+  => buf r m
+  framed := draw-titled-box buf r (rounded-box ()) (style {fg= cyan}) " todo "
+  draw-list framed (inner r) (list-scroll (list-view (@ label-of (visible m)) m.sel m.offset) (inner r).h) plain (style {reverse= true})
+
+fn label-of :: Map Str
+  => t
+  (if (get "done" t) "[x] " else "[ ] ") ++ (get "text" t)
+
+fn draw-status :: Buffer Rect Map Buffer
+  => buf r m
+  done-count := length (/? (t -> get "done" t) m.todos)
+  draw-progress-labelled buf r (style {fg= green}) (style {fg= bright-black}) (style {bold= true}) done-count (max 1 (length m.todos))
+
+fn draw-footer :: Buffer Rect Map Buffer
+  => buf r m
+  if m.adding
+    draw-input buf r (input-scroll m.draft r.w) (style {fg= yellow}) (style {reverse= true})
+  else
+    draw-label buf r (style {fg= bright-black}) (footer-text m) (Left)
+
+fn footer-text :: Map Str
+  => m
+  filter-note := if (m.hide-done) "  [showing open]" else ""
+  "j/k move · space toggle · a add · f filter · q quit" ++ filter-note
+
+fn model-done? :: Map Bool
+  => m
+  m.quit
+
+;; ── Entry ───────────────────────────────────────────────────────────
+
+fn main-flow ::: Term Console
+  =>
+  final := run-app (app (initial-model ()) update-model view-model model-done?) {alt-screen= true}
+  open-count := length (/? (t -> not (get "done" t)) (get "todos" final))
+  println ("bye — " ++ (to-str open-count) ++ " still open")
+
+with default-term
+  main-flow ()

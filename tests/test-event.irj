@@ -1,0 +1,88 @@
+use std.test :open
+use uzor.event :open
+
+key-c := {kind= "key" key= "c" ch= "c" mods= #["ctrl"]}
+plain-a := {kind= "key" key= "a" ch= "a" mods= #[]}
+up := {kind= "key" key= "up" ch= "" mods= #[]}
+resize := {kind= "resize" cols= 80 rows= 24}
+idle := {kind= "none"}
+
+;; ── Descriptors ─────────────────────────────────────────────────────
+
+r1 := test "an unmodified key is its own name" (-> assert-eq "a" (key-desc plain-a))
+r2 := test "modifiers prefix the key" (-> assert-eq "ctrl+c" (key-desc key-c))
+r3 := test "special keys keep their name" (-> assert-eq "up" (key-desc up))
+
+;; Non-key events have no descriptor, so a keymap can be consulted with
+;; any event without checking the kind first.
+r4 := test "a resize has no descriptor" (-> assert-eq "" (key-desc resize))
+
+;; The order is fixed because descriptors are compared as strings — if
+;; it floated, "ctrl+shift+tab" and "shift+ctrl+tab" would be different
+;; keys.
+r5 := test "modifier order is fixed" (-> assert-eq "ctrl+alt+shift+f1" (key-desc {kind= "key" key= "f1" ch= "" mods= #["ctrl" "alt" "shift"]}))
+
+r6 := test "key? matches" (-> assert-true (key? key-c "ctrl+c"))
+r7 := test "key? rejects a near miss" (-> assert-eq false (key? key-c "c"))
+
+;; ── Predicates ──────────────────────────────────────────────────────
+
+r8 := test "key events are recognised" (-> assert-true (key-event? plain-a))
+r9 := test "resize events are recognised" (-> assert-true (resize-event? resize))
+r10 := test "idle events are recognised" (-> assert-true (idle-event? idle))
+r11 := test "eof is its own kind" (-> assert-true (eof-event? {kind= "eof"}))
+
+;; Printable means "could go into a text field": a character, with no
+;; modifier beyond the shift already baked into it.
+r12 := test "a plain letter is printable" (-> assert-true (printable? plain-a))
+r13 := test "a modified letter is not printable" (-> assert-eq false (printable? key-c))
+r14 := test "a named key is not printable" (-> assert-eq false (printable? up))
+
+;; ── Keymaps ─────────────────────────────────────────────────────────
+
+km := keymap #[#["ctrl+c" :quit] #["up" :prev] #["down" :next]]
+
+r15 := test "a bound key gives its message" (-> assert-eq :quit (lookup km key-c))
+r16 := test "another binding in the same table" (-> assert-eq :prev (lookup km up))
+
+;; Most keys in most apps mean nothing, and that is not a failure.
+r17 := test "an unbound key gives unit" (-> assert-eq () (lookup km plain-a))
+r18 := test "a non-key event gives unit" (-> assert-eq () (lookup km resize))
+r19 := test "an empty keymap gives unit" (-> assert-eq () (lookup (keymap #[]) key-c))
+
+;; Chained tables let a component's bindings take precedence over the
+;; app's globals without either knowing about the other.
+local := keymap #[#["up" :scroll-up]]
+
+r20 := test "the first table wins" (-> assert-eq :scroll-up (lookup-in #[local km] up))
+r21 := test "later tables are the fallback" (-> assert-eq :quit (lookup-in #[local km] key-c))
+r22 := test "no table matches, no message" (-> assert-eq () (lookup-in #[local km] plain-a))
+
+;; ── Focus ───────────────────────────────────────────────────────────
+
+f := focus #[:list :input :help]
+
+r23 := test "focus starts at the first id" (-> assert-eq :list (focused f))
+r24 := test "next advances" (-> assert-eq :input (focused (focus-next f)))
+r25 := test "prev goes back" (-> assert-eq :help (focused (focus-prev f)))
+
+;; Wrapping at both ends: tab from the last field returning to the
+;; first is what every form does, and stopping dead reads as a broken
+;; key.
+r26 := test "next wraps at the end" (-> assert-eq :list (focused (focus-next (focus-next (focus-next f)))))
+r27 := test "prev wraps at the start" (-> assert-eq :help (focused (focus-prev f)))
+
+r28 := test "focused? asks about the current id" (-> assert-true (focused? f :list))
+r29 := test "focused? is false elsewhere" (-> assert-eq false (focused? f :input))
+
+r30 := test "focus-on jumps to an id" (-> assert-eq :help (focused (focus-on f :help)))
+
+;; An unknown id leaves the ring alone rather than focusing nothing —
+;; a stale id from a removed pane shouldn't blank the UI.
+r31 := test "focus-on ignores an unknown id" (-> assert-eq :list (focused (focus-on f :nope)))
+
+;; An empty ring is a valid state — a screen with nothing focusable.
+r32 := test "an empty ring focuses nothing" (-> assert-eq () (focused (focus #[])))
+r33 := test "next on an empty ring is a no-op" (-> assert-eq () (focused (focus-next (focus #[]))))
+
+summarize #[r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15 r16 r17 r18 r19 r20 r21 r22 r23 r24 r25 r26 r27 r28 r29 r30 r31 r32 r33]
