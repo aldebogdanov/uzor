@@ -1,3 +1,12 @@
 [project]
 name = "uzor"
 version = "0.1"
+description = "Terminal UI toolkit for Irij — cell buffers, layout, widgets"
+author = "aldebogdanov"
+repo = "https://github.com/aldebogdanov/uzor"
+license = "MIT"
+
+[seeds]
+# uzor.reactive keeps app state in butterfly signals. Declared here so a
+# project that uses uzor gets it without naming it itself.
+butterfly = "0.1"
