@@ -29,6 +29,8 @@ buf-render (frame ())
 uzor = "0.1"
 ```
 
+butterfly, which `uzor.reactive` builds on, comes with it.
+
 ## Why values
 
 Drawing is a pure function from frame to frame. `buf-diff` turns two frames
@@ -470,7 +472,9 @@ cursor position.
 
 Needs Irij ≥ 0.8.8 — earlier builds mis-render styles when a program has a
 top-level binding named `st` (irij#11), and don't check product-spec fields
-(irij#12).
+(irij#12). Irij 0.9.231 reserved `model` outright and fails to parse
+`tests/test-app.irj`, whose update fns take `model`; 0.9.235 makes it a
+keyword only at the head of a declaration again (irij#21).
 
 ```
 irij test        # 313 tests, no terminal required
