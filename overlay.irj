@@ -1,6 +1,6 @@
 mod uzor.overlay
 
-use uzor.core {Rect Buffer Style rect rect-empty? rect-bottom buf-restyle buf-text}
+use uzor.core {Rect Buffer rect rect-empty? rect-bottom buf-restyle buf-text}
 use uzor.style {Style plain}
 use uzor.text {Align Left Center wrap fit}
 use uzor.layout {center inner}

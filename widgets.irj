@@ -1,7 +1,7 @@
 mod uzor.widgets
 
-use uzor.core {Rect Buffer Style rect rect-bottom rect-right rect-empty? rect-contains? buf-text buf-fill buf-put span}
-use uzor.style {plain cell-width}
+use uzor.core {Rect Buffer rect rect-bottom rect-right rect-empty? rect-contains? buf-text buf-fill buf-put span}
+use uzor.style {Style plain cell-width}
 use uzor.text {Align Left Center Right fit truncate ellipsize wrap}
 use uzor.event {key? mouse-press? mouse-pos}
 use uzor.layout {split-h}

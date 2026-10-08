@@ -10,7 +10,7 @@
 ;; wheel scrolls. The delete prompt is answered with its buttons:
 ;; ←/→ or tab to move, enter to choose, escape to cancel, or click.
 
-use std.term {default-term}
+use std.term {Term default-term}
 use uzor.core :open
 use uzor.style :open
 use uzor.text :open
