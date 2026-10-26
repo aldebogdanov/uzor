@@ -10,3 +10,11 @@ license = "MIT"
 # uzor.reactive keeps app state in butterfly signals. Declared here so a
 # project that uses uzor gets it without naming it itself.
 butterfly = "0.1"
+
+# Who may reach Java: modules that bind a Java class with `cap` (caps),
+# write Java by hand (jvm), seeds that bring Java libraries (jars).
+# Written by `irij audit --fix` — review it.
+[trust]
+caps = []
+jvm = []
+jars = []
